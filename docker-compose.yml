@@ -1,0 +1,9 @@
+services:
+  bot:
+    build: .
+    container_name: groupmate
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data          # база (дни рождения, заказы) переживает перезапуски
+      - ./config:/app/config      # каталог, праздники и характер бота правятся без пересборки

@@ -1,0 +1,20 @@
+{
+  "currency": "₽",
+  "categories": [
+    {"id": "gifts", "title": "🎁 Подарочные наборы"},
+    {"id": "sweets", "title": "🍰 Сладкое"},
+    {"id": "custom", "title": "✨ На заказ"}
+  ],
+  "products": [
+    {"id": "gift-s", "category": "gifts", "name": "Набор «Малый»", "price": 1500, "unit": "шт",
+     "description": "Пример товара. Замените название, цену и описание в config/catalog.json."},
+    {"id": "gift-l", "category": "gifts", "name": "Набор «Праздничный»", "price": 3200, "unit": "шт",
+     "description": "Пример товара: большой набор к празднику, упаковка и открытка."},
+    {"id": "cake", "category": "sweets", "name": "Торт на заказ", "price": 1800, "unit": "кг",
+     "description": "Пример товара с единицей «кг»."},
+    {"id": "cookies", "category": "sweets", "name": "Печенье домашнее", "price": 450, "unit": "уп",
+     "description": "Пример товара."},
+    {"id": "custom", "category": "custom", "name": "Индивидуальный заказ", "price": 0, "unit": "шт",
+     "description": "Опишите в комментарии к заказу, что нужно, — мы свяжемся и рассчитаем стоимость."}
+  ]
+}

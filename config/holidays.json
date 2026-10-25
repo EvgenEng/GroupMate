@@ -1,0 +1,12 @@
+{
+  "_comment": "Праздники для мягких напоминаний о заказах. date — ДД.ММ, remind_days_before — за сколько дней напомнить.",
+  "holidays": [
+    {"date": "31.12", "name": "Новый год", "remind_days_before": [14, 5]},
+    {"date": "14.02", "name": "День святого Валентина", "remind_days_before": [7, 2]},
+    {"date": "23.02", "name": "23 Февраля", "remind_days_before": [7, 2]},
+    {"date": "08.03", "name": "8 Марта", "remind_days_before": [10, 3]},
+    {"date": "01.06", "name": "День защиты детей", "remind_days_before": [5]},
+    {"date": "08.07", "name": "День семьи, любви и верности", "remind_days_before": [5]},
+    {"date": "01.09", "name": "1 Сентября", "remind_days_before": [7]}
+  ]
+}
