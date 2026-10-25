@@ -4,7 +4,7 @@ from __future__ import annotations
 import random
 from html import escape
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import IS_MEMBER, IS_NOT_MEMBER, ChatMemberUpdatedFilter
 from aiogram.types import ChatMemberUpdated, Message, User
 
@@ -42,10 +42,10 @@ async def _welcome(chat_id: int, user: User, send, ctx: AppContext) -> None:
 
 
 @router.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
-async def on_join(event: ChatMemberUpdated, ctx: AppContext) -> None:
+async def on_join(event: ChatMemberUpdated, ctx: AppContext, bot: Bot) -> None:
     # Этот апдейт приходит, только если бот — администратор группы.
     await _welcome(event.chat.id, event.new_chat_member.user,
-                   lambda text, **kw: event.bot.send_message(event.chat.id, text, **kw), ctx)
+                   lambda text, **kw: bot.send_message(event.chat.id, text, **kw), ctx)
 
 
 @router.message(F.new_chat_members)
