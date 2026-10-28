@@ -1,20 +1,51 @@
 {
+  "_comment": "Каталог GASTRODOM. price — цена за unit; step — шаг заказа (для «кг» 0.5 = по полкило). Поменяли файл — перезапустите бота.",
   "currency": "₽",
+  "shop": {
+    "name": "GASTRODOM",
+    "about": "Ремесленные натуральные деликатесы из Тверской области. Натуральное копчение, отборное мясо, чистый состав.",
+    "lead_time": "Работаем под заказ: коптим и варим свежую партию специально для вас. Срок изготовления — от 3 до 7 дней.",
+    "footnote": "в/к — варёно-копчёный, с/к — сырокопчёный. Вес весовых позиций примерный — точная сумма после взвешивания."
+  },
   "categories": [
-    {"id": "gifts", "title": "🎁 Подарочные наборы"},
-    {"id": "sweets", "title": "🍰 Сладкое"},
-    {"id": "custom", "title": "✨ На заказ"}
+    {"id": "deli", "title": "🥩 Цельномышечные деликатесы"},
+    {"id": "sausage", "title": "🌭 Колбасы, рулеты, ветчины"},
+    {"id": "sets", "title": "🎁 Готовые наборы и корзины"}
   ],
   "products": [
-    {"id": "gift-s", "category": "gifts", "name": "Набор «Малый»", "price": 1500, "unit": "шт",
-     "description": "Пример товара. Замените название, цену и описание в config/catalog.json."},
-    {"id": "gift-l", "category": "gifts", "name": "Набор «Праздничный»", "price": 3200, "unit": "шт",
-     "description": "Пример товара: большой набор к празднику, упаковка и открытка."},
-    {"id": "cake", "category": "sweets", "name": "Торт на заказ", "price": 1800, "unit": "кг",
-     "description": "Пример товара с единицей «кг»."},
-    {"id": "cookies", "category": "sweets", "name": "Печенье домашнее", "price": 450, "unit": "уп",
-     "description": "Пример товара."},
-    {"id": "custom", "category": "custom", "name": "Индивидуальный заказ", "price": 0, "unit": "шт",
-     "description": "Опишите в комментарии к заказу, что нужно, — мы свяжемся и рассчитаем стоимость."}
+    {"id": "chicken-half", "category": "deli", "name": "Курица (полутушка) в/к", "price": 800, "unit": "кг", "step": 0.5},
+    {"id": "chicken-legs", "category": "deli", "name": "Окорочка куриные в/к", "price": 800, "unit": "кг", "step": 0.5},
+    {"id": "chicken-wings", "category": "deli", "name": "Крылышки куриные в/к", "price": 800, "unit": "кг", "step": 0.5},
+    {"id": "chicken-breast", "category": "deli", "name": "Грудка куриная в/к", "price": 850, "unit": "кг", "step": 0.5},
+    {"id": "carbonade", "category": "deli", "name": "Карбонад классический в/к", "price": 1500, "unit": "кг", "step": 0.5},
+    {"id": "ham-merchant", "category": "deli", "name": "Окорок купеческий в/к", "price": 1500, "unit": "кг", "step": 0.5},
+    {"id": "neck", "category": "deli", "name": "Шейка классическая в/к", "price": 1700, "unit": "кг", "step": 0.5},
+    {"id": "brisket", "category": "deli", "name": "Грудинка в/к", "price": 1000, "unit": "кг", "step": 0.5},
+    {"id": "ribs", "category": "deli", "name": "Рёбра свиные в/к", "price": 1200, "unit": "кг", "step": 0.5},
+    {"id": "nut", "category": "deli", "name": "Мясной «орешек» в/к", "price": 1500, "unit": "кг", "step": 0.5},
+    {"id": "bacon", "category": "deli", "name": "Грудинка (бекон) с/к", "price": 1200, "unit": "кг", "step": 0.5},
+    {"id": "balyk", "category": "deli", "name": "Балык свиной с/к", "price": 2000, "unit": "кг", "step": 0.5},
+    {"id": "carpaccio", "category": "deli", "name": "Карпаччо из куриной грудки", "price": 1500, "unit": "кг", "step": 0.5},
+    {"id": "beef-tenderloin", "category": "deli", "name": "Говяжья вырезка в/к", "price": 3400, "unit": "кг", "step": 0.5},
+
+    {"id": "sausage-home", "category": "sausage", "name": "Колбаса домашняя", "price": 1500, "unit": "кг", "step": 0.5,
+     "description": "Свинина и говядина."},
+    {"id": "sausage-tender", "category": "sausage", "name": "Колбаса нежная в/к", "price": 1200, "unit": "кг", "step": 0.5,
+     "description": "Курица и индейка."},
+    {"id": "ham-home", "category": "sausage", "name": "Ветчина домашняя", "price": 1500, "unit": "кг", "step": 0.5,
+     "description": "Свинина и говядина."},
+    {"id": "ham-turkey", "category": "sausage", "name": "Ветчина из индейки в/к", "price": 1500, "unit": "кг", "step": 0.5},
+    {"id": "ham-chicken", "category": "sausage", "name": "Ветчина куриная", "price": 1200, "unit": "кг", "step": 0.5},
+    {"id": "roll-chicken", "category": "sausage", "name": "Рулет куриный", "price": 1200, "unit": "кг", "step": 0.5},
+    {"id": "roll-turkey", "category": "sausage", "name": "Рулет из индейки", "price": 1600, "unit": "кг", "step": 0.5},
+    {"id": "roll-4meat", "category": "sausage", "name": "Рулет «4 мяса»", "price": 1800, "unit": "кг", "step": 0.5,
+     "description": "Свинина, говядина, курица, индейка."},
+
+    {"id": "set-intro", "category": "sets", "name": "Набор «Знакомство с GASTRODOM»", "price": 2490, "unit": "шт", "step": 1,
+     "description": "Шейка, грудинка в/к, карбонад, колбаса домашняя, ветчина из индейки, рулет куриный. Общий вес около 1,5 кг."},
+    {"id": "set-table", "category": "sets", "name": "Набор «Мясной стол»", "price": 3490, "unit": "шт", "step": 1,
+     "description": "Шейка, окорок, грудинка, карбонад, курочка-полутушка, колбаса домашняя, ветчина из индейки, рулет куриный. Общий вес до 2,5 кг."},
+    {"id": "set-week", "category": "sets", "name": "Набор «Семейная неделя»", "price": 4990, "unit": "шт", "step": 1,
+     "description": "Шейка, грудинка, карбонад, курочка-полутушка, колбаса домашняя, ветчина из индейки, рулет куриный, говяжья вырезка. Общий вес до 3 кг."}
   ]
 }

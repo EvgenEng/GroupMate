@@ -1,7 +1,7 @@
-"""Общие объекты бота: настройки, база, нейросеть, погода, каталог.
+"""Общие объекты бота: настройки, база, нейросеть, погода, каталог, заказы, рассылки.
 
-Объект кладётся в диспетчер (dp["ctx"]), и aiogram сам передаёт его в хендлеры
-аргументом `ctx`.
+Один объект на оба мессенджера. В Telegram он лежит в диспетчере (dp["ctx"]), и aiogram
+сам передаёт его в хендлеры аргументом `ctx`; ВК-бот получает его в конструкторе.
 """
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ from zoneinfo import ZoneInfo
 from app.config import Settings
 from app.core.holidays import Holiday
 from app.core.orders import Catalog
+from app.messenger import Messenger
 from app.services.db import Database
 from app.services.llm import LLMClient
+from app.services.orders import OrderService
 from app.services.weather import WeatherService
 
 
@@ -25,7 +27,12 @@ class AppContext:
     weather: WeatherService
     catalog: Catalog
     holidays: list[Holiday]
-    bot_username: str = ""
+    orders: OrderService
+    messenger: Messenger
+
+    @property
+    def bot_username(self) -> str:
+        return self.messenger.tg_username
 
     def now(self) -> datetime:
         return datetime.now(ZoneInfo(self.settings.timezone))
@@ -34,13 +41,31 @@ class AppContext:
         return self.now().date()
 
     def is_owner(self, user_id: int | None) -> bool:
+        """Владелец бота в Telegram."""
         return bool(user_id) and user_id == self.settings.owner_id
 
     def deep_link(self, payload: str) -> str:
         return f"https://t.me/{self.bot_username}?start={payload}"
 
-    async def llm_allowed(self, user_id: int) -> bool:
-        """Дневной лимит обращений к нейросети на человека. Владельца не ограничиваем."""
-        if self.is_owner(user_id):
+    async def llm_allowed(self, platform: str, user_id: int, privileged: bool = False) -> bool:
+        """Дневной лимит обращений к нейросети на человека. Владельца и админов не ограничиваем."""
+        if privileged:
             return True
-        return await self.db.usage_hit(self.today().isoformat(), user_id, self.settings.llm_daily_cap)
+        return await self.db.usage_hit(self.today().isoformat(), platform, user_id, self.settings.llm_daily_cap)
+
+
+def build_context(settings: Settings) -> AppContext:
+    from app.core.holidays import load_holidays
+
+    db = Database(settings.db_path)
+    catalog = Catalog.load(settings.catalog_path)
+    return AppContext(
+        settings=settings,
+        db=db,
+        llm=LLMClient(settings.llm_providers, settings.llm_system_prompt),
+        weather=WeatherService(settings.weather_locations, settings.timezone),
+        catalog=catalog,
+        holidays=load_holidays(settings.holidays_path),
+        orders=OrderService(db, catalog),
+        messenger=Messenger(settings, db, catalog),
+    )

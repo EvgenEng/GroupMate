@@ -75,7 +75,7 @@ async def inline(query: InlineQuery, ctx: AppContext) -> None:
         await query.answer([hint], cache_time=5, is_personal=True)
         return
 
-    if not await ctx.llm_allowed(query.from_user.id):
+    if not await ctx.llm_allowed("tg", query.from_user.id, ctx.is_owner(query.from_user.id)):
         await query.answer([], cache_time=30, is_personal=True,
                            button=_pm_button("Лимит вопросов на сегодня исчерпан"))
         return

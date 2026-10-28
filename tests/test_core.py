@@ -193,31 +193,44 @@ class OrderTests(unittest.TestCase):
         self.catalog = od.Catalog.load(ROOT / "config" / "catalog.json")
 
     def test_catalog_loads(self):
-        self.assertTrue(self.catalog.products)
-        self.assertTrue(self.catalog.in_category("gifts"))
+        self.assertEqual(len(self.catalog.products), 25)
+        self.assertEqual([c.id for c in self.catalog.visible_categories()], ["deli", "sausage", "sets"])
+        neck = self.catalog.product("neck")
+        self.assertEqual((neck.price, neck.unit, neck.step), (1700, "кг", 0.5))
+        self.assertIn("3 до 7 дней", od.catalog_intro(self.catalog))
 
-    def test_cart(self):
-        lines = od.build_lines({"gift-s": 2, "cookies": 1, "missing": 3}, self.catalog)
+    def test_cart_by_weight_and_pieces(self):
+        lines = od.build_lines({"neck": 1.5, "set-intro": 2, "missing": 3}, self.catalog)
         self.assertEqual(len(lines), 2)
-        self.assertEqual(od.cart_total(lines), 3450)
-        self.assertIn("3 450 ₽", od.format_cart(lines, "₽"))
+        self.assertEqual(od.cart_total(lines), 1700 * 1.5 + 2490 * 2)
+        text = od.format_cart(lines, "₽")
+        self.assertIn("1,5 кг", text)
+        self.assertIn("≈ 7 530 ₽", text)          # есть весовой товар — сумма примерная
+        only_sets = od.format_cart(od.build_lines({"set-week": 1}, self.catalog), "₽")
+        self.assertNotIn("≈", only_sets)
         self.assertIn("пуста", od.format_cart([], "₽"))
+
+    def test_fmt_qty(self):
+        self.assertEqual([od.fmt_qty(x) for x in (1, 1.0, 0.5, 2.25)], ["1", "1", "0,5", "2,25"])
 
     def test_order_text(self):
         o = od.OrderView(7, "Ольга", "olga", 5, "+79990000000", "к пятнице",
-                         [("Торт", 2, 1800.0, "кг")], 3600, "new", "26.10.2026 12:00")
+                         [("Шейка", 1.5, 1700.0, "кг")], 2550, "new", "26.10.2026 12:00")
         text = od.format_order(o, "₽", for_owner=True)
         self.assertIn("Заказ №7", text)
         self.assertIn("@olga", text)
+        self.assertIn("Telegram", text)
         self.assertNotIn("+7999", od.format_order(o, "₽"))
+        o.platform = "vk"
+        self.assertIn('href="https://vk.ru/id5"', od.format_order(o, "₽", for_owner=True))
 
 
 class HolidayTests(unittest.TestCase):
     def test_due(self):
         items = hol.load_holidays(ROOT / "config" / "holidays.json")
-        due = hol.holidays_to_remind(items, date(2027, 2, 26))  # за 10 дней до 8 Марта
-        self.assertEqual([(h.name, left) for h, left in due], [("8 Марта", 10)])
-        self.assertIn("8 Марта", hol.holiday_text(due[0][0], 10, random.Random(0)))
+        due = hol.holidays_to_remind(items, date(2027, 2, 28))  # за 8 дней до 8 Марта
+        self.assertEqual([(h.name, left) for h, left in due], [("8 Марта", 8)])
+        self.assertIn("8 Марта", hol.holiday_text(due[0][0], 8, random.Random(0)))
         self.assertEqual(hol.holidays_to_remind(items, date(2027, 2, 27)), [])
 
 
@@ -227,24 +240,74 @@ class DatabaseTests(unittest.TestCase):
             db = Database(Path(tmp) / "t.db")
 
             async def scenario():
-                self.assertEqual(await db.cart_change(1, "p", 2), 2)
-                self.assertEqual(await db.cart_change(1, "p", -5), 0)
-                self.assertEqual(await db.cart(1), {})
-                oid = await db.create_order(1, "Имя", None, "+7", "", [("X", 1, 10.0, "шт")], 10)
+                self.assertEqual(await db.cart_change("tg", 1, "p", 0.5), 0.5)
+                self.assertEqual(await db.cart_change("tg", 1, "p", 0.5), 1.0)
+                self.assertEqual(await db.cart_change("vk", 1, "p", 1), 1.0)   # тот же ID, другая сеть
+                self.assertEqual(await db.cart_change("tg", 1, "p", -5), 0)
+                self.assertEqual(await db.cart("tg", 1), {})
+                self.assertEqual(await db.cart("vk", 1), {"p": 1.0})
+                oid = await db.create_order("vk", 1, "Имя", None, "+7", "", [("X", 1.5, 10.0, "кг")], 15)
                 await db.set_order_status(oid, "accepted")
-                self.assertEqual((await db.order(oid)).status, "accepted")
+                order = await db.order(oid)
+                self.assertEqual((order.status, order.platform, order.items[0][1]), ("accepted", "vk", 1.5))
                 self.assertEqual(len(await db.recent_orders()), 1)
-                first = await db.add_birthday("Иван", 1, 2, user_id=9)
-                second = await db.add_birthday("Иван П.", 3, 4, user_id=9)  # тот же человек — обновление
+                self.assertEqual(await db.orders_of("tg", 1), [])
+                first = await db.add_birthday("Иван", 1, 2, "tg", user_id=9)
+                second = await db.add_birthday("Иван П.", 3, 4, "tg", user_id=9)  # тот же человек — обновление
                 self.assertEqual(first, second)
+                await db.add_birthday("Иван ВК", 5, 6, "vk", user_id=9)
+                self.assertEqual(len(await db.list_birthdays()), 2)
+                self.assertTrue(await db.delete_birthday_of("vk", 9))
                 self.assertEqual(len(await db.list_birthdays()), 1)
-                self.assertTrue(await db.usage_hit("d", 1, 2))
-                self.assertTrue(await db.usage_hit("d", 1, 2))
-                self.assertFalse(await db.usage_hit("d", 1, 2))
+                self.assertTrue(await db.usage_hit("d", "tg", 1, 2))
+                self.assertTrue(await db.usage_hit("d", "tg", 1, 2))
+                self.assertFalse(await db.usage_hit("d", "tg", 1, 2))
+                self.assertTrue(await db.usage_hit("d", "vk", 1, 2))
+                self.assertTrue(await db.touch_user("tg", 5, "Аня", "Artdin93"))
+                self.assertFalse(await db.touch_user("tg", 5, "Аня", "Artdin93"))
+                self.assertEqual(await db.user_id_by_username("tg", "@artdin93"), 5)
                 await db.kv_set("k", {"a": [1, 2]})
                 self.assertEqual(await db.kv_get("k"), {"a": [1, 2]})
 
             asyncio.run(scenario())
+            db.close()
+
+    def test_migrates_first_version_database(self):
+        """База первой версии (без колонки platform) обновляется без потери данных."""
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            conn = sqlite3.connect(path)
+            conn.executescript("""
+                CREATE TABLE users (user_id INTEGER PRIMARY KEY, first_name TEXT, username TEXT, last_seen TEXT);
+                CREATE TABLE birthdays (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, day INTEGER NOT NULL,
+                    month INTEGER NOT NULL, user_id INTEGER UNIQUE, username TEXT);
+                CREATE TABLE cart (user_id INTEGER NOT NULL, product_id TEXT NOT NULL, qty INTEGER NOT NULL,
+                    PRIMARY KEY (user_id, product_id));
+                CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, customer_name TEXT,
+                    username TEXT, phone TEXT, comment TEXT, items_json TEXT NOT NULL, total REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'new', created_at TEXT NOT NULL);
+                CREATE TABLE usage (day TEXT NOT NULL, user_id INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (day, user_id));
+                CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO users VALUES (5, 'Аня', 'artdin93', '2026-10-01');
+                INSERT INTO birthdays(name, day, month, user_id) VALUES ('Аня', 3, 4, 5);
+                INSERT INTO cart VALUES (5, 'neck', 2);
+                INSERT INTO orders(user_id, customer_name, items_json, total, created_at)
+                    VALUES (5, 'Аня', '[["X", 1, 10.0, "шт"]]', 10, '01.10.2026 10:00');
+            """)
+            conn.commit()
+            conn.close()
+            db = Database(path)
+
+            async def check():
+                self.assertEqual(await db.user_id_by_username("tg", "artdin93"), 5)
+                self.assertEqual((await db.birthday_of("tg", 5)).name, "Аня")
+                self.assertEqual(await db.cart("tg", 5), {"neck": 2.0})
+                self.assertEqual((await db.order(1)).platform, "tg")
+                self.assertTrue(await db.usage_hit("d", "tg", 5, 1))
+
+            asyncio.run(check())
             db.close()
 
 
@@ -252,11 +315,13 @@ class ConfigAndMiscTests(unittest.TestCase):
     def test_dotenv(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / ".env"
-            p.write_text("GM_TEST_A=hello   # комментарий\nGM_TEST_B=\"x # y\"\n# GM_TEST_C=1\n", encoding="utf-8")
+            p.write_text("GM_TEST_A=hello   # комментарий\nGM_TEST_B=\"x # y\"\n# GM_TEST_C=1\n"
+                         "GM_TEST_D=            # подсказка\n", encoding="utf-8")
             load_dotenv(p)
             self.assertEqual(os.environ["GM_TEST_A"], "hello")
             self.assertEqual(os.environ["GM_TEST_B"], "x # y")
             self.assertNotIn("GM_TEST_C", os.environ)
+            self.assertEqual(os.environ["GM_TEST_D"], "")
 
     def test_locations_and_weekdays(self):
         locs = parse_locations("Москва:55.75:37.61; Юг: МО:54.9:37.4")

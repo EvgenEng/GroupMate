@@ -23,7 +23,9 @@ def load_dotenv(path: Path) -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip()
-        if value and value[0] in "\"'" and value[-1:] == value[0]:
+        if value.startswith("#"):  # «KEY=   # подсказка» — значение пустое
+            value = ""
+        elif value and value[0] in "\"'" and value[-1:] == value[0]:
             value = value[1:-1]
         elif " #" in value:  # комментарий в конце строки
             value = value.split(" #", 1)[0].rstrip()
@@ -47,6 +49,21 @@ def _bool(name: str, default: bool = False) -> bool:
     if not value:
         return default
     return value in {"1", "true", "yes", "on", "да"}
+
+
+def _handles(name: str) -> tuple[str, ...]:
+    """Список людей: числовые ID, @username или ссылки t.me/…, vk.ru/… через запятую.
+
+    «https://t.me/artdin93, 123» → ("artdin93", "123")."""
+    result = []
+    for part in _str(name).replace(";", ",").split(","):
+        part = part.strip().rstrip("/")
+        for prefix in ("https://", "http://", "www.", "t.me/", "vk.ru/", "vk.com/", "m.vk.ru/", "m.vk.com/", "@"):
+            if part.startswith(prefix):
+                part = part[len(prefix):]
+        if part:
+            result.append(part)
+    return tuple(result)
 
 
 def _time(name: str, default: str) -> tuple[int, int]:
@@ -121,9 +138,36 @@ class Settings:
     order_reminder_weekdays: tuple[int, ...] = (4,)  # 0=пн … 4=пт
     order_reminder_time: tuple[int, int] = (12, 0)
 
+    # Кому приходят уведомления о заказах (и кто может менять их статус)
+    order_notify_tg: tuple[str, ...] = ()
+    order_notify_vk: tuple[str, ...] = ()
+
+    # ВКонтакте
+    vk_token: str = ""
+    vk_group_id: int = 0
+    vk_chat_peer_id: int = 0      # беседа, куда бот пишет погоду, поздравления, напоминания
+    vk_admins: tuple[str, ...] = ()
+
     @property
     def llm_enabled(self) -> bool:
         return bool(self.llm_providers)
+
+    @property
+    def tg_enabled(self) -> bool:
+        return bool(self.bot_token)
+
+    @property
+    def vk_enabled(self) -> bool:
+        return bool(self.vk_token and self.vk_group_id)
+
+    @property
+    def tg_managers(self) -> tuple[str, ...]:
+        """Менеджеры заказов в Telegram. Не заданы — уведомления получает владелец."""
+        return self.order_notify_tg or ((str(self.owner_id),) if self.owner_id else ())
+
+    @property
+    def vk_managers(self) -> tuple[str, ...]:
+        return self.order_notify_vk or self.vk_admins
 
 
 _WEEKDAYS = {"пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "вс": 6,
@@ -187,4 +231,10 @@ def load_settings() -> Settings:
         order_reminders_enabled=_bool("ORDER_REMINDERS_ENABLED", True),
         order_reminder_weekdays=_weekdays(_str("ORDER_REMINDER_WEEKDAYS"), (4,)),
         order_reminder_time=_time("ORDER_REMINDER_TIME", "12:00"),
+        order_notify_tg=_handles("ORDER_NOTIFY_TG"),
+        order_notify_vk=_handles("ORDER_NOTIFY_VK"),
+        vk_token=_str("VK_TOKEN"),
+        vk_group_id=int("".join(ch for ch in _str("VK_GROUP_ID") if ch.isdigit()) or 0),  # «club123» → 123
+        vk_chat_peer_id=_int("VK_CHAT_PEER_ID"),
+        vk_admins=_handles("VK_ADMINS"),
     )

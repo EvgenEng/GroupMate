@@ -15,12 +15,17 @@ router = Router(name="birthdays")
 
 @router.message(Command("mybd"))
 async def my_birthday(message: Message, command: CommandObject, ctx: AppContext) -> None:
+    user = message.from_user
+    if (command.args or "").strip().lower() in {"удалить", "del", "delete"}:
+        ok = await ctx.db.delete_birthday_of("tg", user.id)
+        await message.answer("🗑 Удалил вашу дату." if ok else "Вашей даты и так нет в списке.")
+        return
     parsed = parse_day_month(command.args or "")
     if not parsed:
-        await message.answer("Напишите дату так: <code>/mybd 15.04</code> (день.месяц) 🎂")
+        await message.answer("Напишите дату так: <code>/mybd 15.04</code> (день.месяц) 🎂\n"
+                             "Убрать себя из списка: <code>/mybd удалить</code>")
         return
-    user = message.from_user
-    await ctx.db.add_birthday(user.full_name, parsed[0], parsed[1], user.id, user.username)
+    await ctx.db.add_birthday(user.full_name, parsed[0], parsed[1], "tg", user.id, user.username)
     await message.answer(f"🎂 Записал! В {parsed[0]:02d}.{parsed[1]:02d} поздравлю вас в группе 🎉")
 
 
@@ -49,7 +54,7 @@ async def bd_add(message: Message, command: CommandObject, ctx: AppContext) -> N
         await message.answer("Формат: <code>/bd_add 15.04 Иван Петров</code>\n"
                              "Можно ответом на сообщение человека — тогда он будет упомянут ссылкой.")
         return
-    bd_id = await ctx.db.add_birthday(name, parsed[0], parsed[1],
+    bd_id = await ctx.db.add_birthday(name, parsed[0], parsed[1], "tg",
                                       target.id if target else None, target.username if target else None)
     await message.answer(f"✅ Добавлено (ID {bd_id}): {escape(name)} — {parsed[0]:02d}.{parsed[1]:02d}")
 

@@ -5,7 +5,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.core.orders import Catalog, CartLine, STATUSES
+from app.core.orders import Catalog, CartLine, STATUSES, fmt_qty
 
 
 class Shop(CallbackData, prefix="shop"):
@@ -42,7 +42,7 @@ def categories_kb(catalog: Catalog) -> InlineKeyboardMarkup:
 def products_kb(catalog: Catalog, category_id: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for p in catalog.in_category(category_id):
-        kb.button(text=f"{p.name} — {int(p.price)} {catalog.currency}",
+        kb.button(text=f"{p.name} — {int(p.price)} {catalog.currency}/{p.unit}",
                   callback_data=Shop(action="prod", value=p.id))
     kb.button(text="⬅️ Категории", callback_data=Shop(action="cats"))
     kb.button(text="🛒 Корзина", callback_data=Shop(action="cart"))
@@ -50,11 +50,11 @@ def products_kb(catalog: Catalog, category_id: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def product_kb(product_id: str, category_id: str, in_cart: int) -> InlineKeyboardMarkup:
+def product_kb(product_id: str, category_id: str, in_cart: float, unit: str = "шт") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if in_cart:
         kb.button(text="➖", callback_data=Shop(action="sub", value=product_id))
-        kb.button(text=f"🛒 {in_cart}", callback_data=Shop(action="cart"))
+        kb.button(text=f"🛒 {fmt_qty(in_cart)} {unit}", callback_data=Shop(action="cart"))
         kb.button(text="➕", callback_data=Shop(action="add", value=product_id))
     else:
         kb.button(text="➕ В корзину", callback_data=Shop(action="add", value=product_id))

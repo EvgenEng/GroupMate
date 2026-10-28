@@ -1,7 +1,7 @@
 """Команды владельца для проверки без ожидания расписания."""
 from __future__ import annotations
 
-from aiogram import Bot, Router
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -12,17 +12,17 @@ router = Router(name="admin")
 
 
 @router.message(Command("test_morning"))
-async def test_morning(message: Message, ctx: AppContext, bot: Bot) -> None:
+async def test_morning(message: Message, ctx: AppContext) -> None:
     if ctx.is_owner(message.from_user.id):
-        await jobs.weather_morning(bot, ctx, ctx.now(), force=True)
-        await message.answer("✅ Утренняя сводка отправлена в группу.")
+        await jobs.weather_morning(ctx, ctx.now(), force=True)
+        await message.answer("✅ Утренняя сводка отправлена в группу и беседу.")
 
 
 @router.message(Command("test_evening"))
-async def test_evening(message: Message, ctx: AppContext, bot: Bot) -> None:
+async def test_evening(message: Message, ctx: AppContext) -> None:
     if ctx.is_owner(message.from_user.id):
-        await jobs.weather_evening(bot, ctx, ctx.now(), force=True)
-        await message.answer("✅ Вечерняя сводка отправлена в группу.")
+        await jobs.weather_evening(ctx, ctx.now(), force=True)
+        await message.answer("✅ Вечерняя сводка отправлена в группу и беседу.")
 
 
 @router.message(Command("test_bd"))

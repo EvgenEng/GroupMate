@@ -49,13 +49,13 @@ async def talk(message: Message, ctx: AppContext, bot: Bot) -> None:
             await message.answer("Поболтать пока не могу — нейросеть не подключена. "
                                  "Но погода (/weather) и заказы (/catalog) работают! 🙂")
         return
-    if not await ctx.llm_allowed(message.from_user.id):
+    if not await ctx.llm_allowed("tg", message.from_user.id, ctx.is_owner(message.from_user.id)):
         await message.reply(random.choice(LIMIT_TEXTS))
         return
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     who = message.from_user.first_name
     try:
-        answer = await ctx.llm.chat(message.chat.id, f"{who}: {question}",
+        answer = await ctx.llm.chat(f"tg:{message.chat.id}", f"{who}: {question}",
                                     extra_context=f"Сегодня {ctx.today().strftime('%d.%m.%Y')}.")
     except LLMError as exc:
         logger.warning("LLM не ответила: %s", exc)

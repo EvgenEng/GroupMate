@@ -1,10 +1,10 @@
-"""Заказы: каталог → корзина → оформление → уведомление владельцу → статусы."""
+"""Telegram: каталог → корзина → оформление → уведомление менеджерам → статусы."""
 from __future__ import annotations
 
 import logging
 import re
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -13,13 +13,13 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from app import keyboards as kb
 from app.context import AppContext
-from app.core.orders import STATUS_FOR_CUSTOMER, STATUSES, build_lines, cart_total, format_cart, \
-    format_order, format_product
+from app.core.orders import STATUSES, catalog_intro, checkout_comment_hint, format_cart, format_order, \
+    format_product
 
 logger = logging.getLogger(__name__)
 router = Router(name="orders")
 
-CATALOG_TITLE = "📋 <b>Каталог</b>\n\nВыберите раздел:"
+PLATFORM = "tg"
 PHONE_RE = re.compile(r"^\+?[\d\s\-()]{7,20}$")
 
 
@@ -33,7 +33,7 @@ async def show_catalog(message: Message, ctx: AppContext) -> None:
     if not ctx.catalog.products:
         await message.answer("Каталог пока пуст — скоро здесь появятся товары 🙂")
         return
-    await message.answer(CATALOG_TITLE, reply_markup=kb.categories_kb(ctx.catalog))
+    await message.answer(catalog_intro(ctx.catalog), reply_markup=kb.categories_kb(ctx.catalog))
 
 
 @router.message(Command("catalog", "order", "zakaz"))
@@ -55,8 +55,15 @@ async def _edit(call: CallbackQuery, text: str, markup) -> None:
 
 
 async def _cart_view(user_id: int, ctx: AppContext):
-    lines = build_lines(await ctx.db.cart(user_id), ctx.catalog)
+    lines = await ctx.orders.lines(PLATFORM, user_id)
     return format_cart(lines, ctx.catalog.currency), kb.cart_kb(lines)
+
+
+async def _product_view(user_id: int, product_id: str, ctx: AppContext):
+    product = ctx.catalog.product(product_id)
+    qty = await ctx.orders.qty(PLATFORM, user_id, product_id)
+    return (format_product(product, ctx.catalog.currency, qty),
+            kb.product_kb(product.id, product.category, qty, product.unit))
 
 
 @router.callback_query(kb.Shop.filter())
@@ -66,44 +73,35 @@ async def shop_callback(call: CallbackQuery, callback_data: kb.Shop, ctx: AppCon
     catalog = ctx.catalog
 
     if action == "cats":
-        await _edit(call, CATALOG_TITLE, kb.categories_kb(catalog))
+        await _edit(call, catalog_intro(catalog), kb.categories_kb(catalog))
     elif action == "cat":
         category = catalog.category(value)
         title = category.title if category else "Раздел"
         await _edit(call, f"📋 <b>{title}</b>\n\nВыберите товар:", kb.products_kb(catalog, value))
     elif action == "prod":
-        product = catalog.product(value)
-        if not product:
+        if not catalog.product(value):
             await call.answer("Товар не найден", show_alert=True)
             return
-        qty = (await ctx.db.cart(user_id)).get(product.id, 0)
-        await _edit(call, format_product(product, catalog.currency, qty),
-                    kb.product_kb(product.id, product.category, qty))
+        await _edit(call, *await _product_view(user_id, value, ctx))
     elif action in {"add", "sub"}:
-        product = catalog.product(value)
-        if not product:
+        qty = await ctx.orders.change(PLATFORM, user_id, value, 1 if action == "add" else -1)
+        if qty is None:
             await call.answer("Товар не найден", show_alert=True)
             return
-        qty = await ctx.db.cart_change(user_id, product.id, 1 if action == "add" else -1)
-        await call.answer(f"В корзине: {qty} {product.unit}" if qty else "Убрано из корзины")
+        await call.answer("Добавлено в корзину" if action == "add" else ("Убрано" if not qty else "Готово"))
         # Обновляем то сообщение, где нажали: карточку товара или корзину.
         if call.message.text and call.message.text.startswith("🛒"):
-            text, markup = await _cart_view(user_id, ctx)
-            await _edit(call, text, markup)
+            await _edit(call, *await _cart_view(user_id, ctx))
         else:
-            await _edit(call, format_product(product, catalog.currency, qty),
-                        kb.product_kb(product.id, product.category, qty))
+            await _edit(call, *await _product_view(user_id, value, ctx))
         return
     elif action == "cart":
-        text, markup = await _cart_view(user_id, ctx)
-        await _edit(call, text, markup)
+        await _edit(call, *await _cart_view(user_id, ctx))
     elif action == "clear":
-        await ctx.db.cart_clear(user_id)
-        text, markup = await _cart_view(user_id, ctx)
-        await _edit(call, text, markup)
+        await ctx.orders.clear(PLATFORM, user_id)
+        await _edit(call, *await _cart_view(user_id, ctx))
     elif action == "checkout":
-        lines = build_lines(await ctx.db.cart(user_id), catalog)
-        if not lines:
+        if not await ctx.orders.lines(PLATFORM, user_id):
             await call.answer("Корзина пуста", show_alert=True)
             return
         await state.set_state(Checkout.phone)
@@ -126,7 +124,7 @@ async def checkout_cancel(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Checkout.phone)
-async def checkout_phone(message: Message, state: FSMContext) -> None:
+async def checkout_phone(message: Message, state: FSMContext, ctx: AppContext) -> None:
     if message.contact:
         phone = message.contact.phone_number
     elif message.text and PHONE_RE.match(message.text.strip()):
@@ -136,15 +134,14 @@ async def checkout_phone(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(phone=phone)
     await state.set_state(Checkout.comment)
-    await message.answer("💬 Есть пожелания? Например: к какому дню нужно, удобное время, детали. "
-                         "Или нажмите «Без комментария».", reply_markup=kb.skip_kb())
+    await message.answer(checkout_comment_hint(ctx.catalog), reply_markup=kb.skip_kb())
 
 
 @router.message(Checkout.comment, F.text)
 async def checkout_comment(message: Message, state: FSMContext, ctx: AppContext) -> None:
     comment = "" if message.text == "Без комментария" else message.text.strip()[:500]
     await state.update_data(comment=comment)
-    lines = build_lines(await ctx.db.cart(message.from_user.id), ctx.catalog)
+    lines = await ctx.orders.lines(PLATFORM, message.from_user.id)
     if not lines:
         await state.clear()
         await message.answer("Корзина опустела 🤷 Загляните в /catalog", reply_markup=ReplyKeyboardRemove())
@@ -154,28 +151,18 @@ async def checkout_comment(message: Message, state: FSMContext, ctx: AppContext)
 
 
 @router.message(Checkout.confirm, F.text == "✅ Подтвердить")
-async def checkout_confirm(message: Message, state: FSMContext, ctx: AppContext, bot: Bot) -> None:
+async def checkout_confirm(message: Message, state: FSMContext, ctx: AppContext) -> None:
     data = await state.get_data()
     user = message.from_user
-    lines = build_lines(await ctx.db.cart(user.id), ctx.catalog)
     await state.clear()
-    if not lines:
+    order = await ctx.orders.place(PLATFORM, user.id, user.full_name, user.username,
+                                   data.get("phone", ""), data.get("comment", ""))
+    if not order:
         await message.answer("Корзина пуста 🤷", reply_markup=ReplyKeyboardRemove())
         return
-    items = [(l.product.name, l.qty, l.product.price, l.product.unit) for l in lines]
-    order_id = await ctx.db.create_order(user.id, user.full_name, user.username, data.get("phone", ""),
-                                         data.get("comment", ""), items, cart_total(lines))
-    await ctx.db.cart_clear(user.id)
-    order = await ctx.db.order(order_id)
-    await message.answer(f"🎉 Заказ №{order_id} оформлен! Мы скоро свяжемся с вами.\n\n"
+    await message.answer(f"🎉 Заказ №{order.id} оформлен! Мы скоро свяжемся с вами.\n\n"
                          + format_order(order, ctx.catalog.currency), reply_markup=ReplyKeyboardRemove())
-    if ctx.settings.owner_id:
-        try:
-            await bot.send_message(ctx.settings.owner_id, "🔔 <b>Новый заказ!</b>\n\n"
-                                   + format_order(order, ctx.catalog.currency, for_owner=True),
-                                   reply_markup=kb.owner_order_kb(order_id))
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Не удалось уведомить владельца о заказе %s: %s", order_id, exc)
+    await ctx.messenger.notify_new_order(order)
 
 
 @router.message(Checkout.confirm)
@@ -184,38 +171,31 @@ async def checkout_confirm_other(message: Message) -> None:
 
 
 @router.callback_query(kb.OrderStatus.filter())
-async def order_status(call: CallbackQuery, callback_data: kb.OrderStatus, ctx: AppContext, bot: Bot) -> None:
-    if not ctx.is_owner(call.from_user.id):
-        await call.answer("Только для владельца", show_alert=True)
+async def order_status(call: CallbackQuery, callback_data: kb.OrderStatus, ctx: AppContext) -> None:
+    if not await ctx.messenger.is_manager(PLATFORM, call.from_user.id):
+        await call.answer("Только для менеджеров", show_alert=True)
         return
-    order = await ctx.db.order(callback_data.order_id)
+    order = await ctx.orders.set_status(callback_data.order_id, callback_data.status)
     if not order:
         await call.answer("Заказ не найден", show_alert=True)
         return
-    await ctx.db.set_order_status(order.id, callback_data.status)
-    order.status = callback_data.status
     await _edit(call, format_order(order, ctx.catalog.currency, for_owner=True), kb.owner_order_kb(order.id))
     await call.answer(f"Статус: {STATUSES[callback_data.status]}")
-    note = STATUS_FOR_CUSTOMER.get(callback_data.status)
-    if note:
-        try:
-            await bot.send_message(order.user_id, note.format(id=order.id))
-        except Exception as exc:  # noqa: BLE001 — клиент мог заблокировать бота
-            logger.warning("Не удалось уведомить клиента о заказе %s: %s", order.id, exc)
+    await ctx.messenger.notify_customer(order)
 
 
 @router.message(Command("myorders"), F.chat.type == "private")
 async def my_orders(message: Message, ctx: AppContext) -> None:
-    orders = await ctx.db.orders_of(message.from_user.id)
+    orders = await ctx.db.orders_of(PLATFORM, message.from_user.id)
     if not orders:
         await message.answer("Заказов пока нет. Каталог — /catalog")
         return
     await message.answer("\n\n".join(format_order(o, ctx.catalog.currency) for o in orders))
 
 
-@router.message(Command("orders"))
+@router.message(Command("orders"), F.chat.type == "private")
 async def all_orders(message: Message, ctx: AppContext) -> None:
-    if not ctx.is_owner(message.from_user.id) or message.chat.type != "private":
+    if not await ctx.messenger.is_manager(PLATFORM, message.from_user.id):
         return
     orders = await ctx.db.recent_orders()
     if not orders:

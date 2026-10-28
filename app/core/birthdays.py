@@ -18,9 +18,13 @@ class Birthday:
     month: int
     user_id: int | None = None
     username: str | None = None
+    platform: str = "tg"  # tg | vk — откуда человек
 
     def mention(self) -> str:
+        """HTML-ссылка на человека. Во ВКонтакте превращается в упоминание [id|Имя]."""
         name = escape(self.name)
+        if self.user_id and self.platform == "vk":
+            return f'<a href="https://vk.ru/id{self.user_id}">{name}</a>'
         if self.user_id:
             return f'<a href="tg://user?id={self.user_id}">{name}</a>'
         if self.username:
@@ -124,3 +128,13 @@ def insert_mentions(text: str, people: list[Birthday]) -> str:
         else:
             result = f"{b.mention()}, " + result
     return result
+
+
+def parse_vk_bdate(bdate: str | None) -> tuple[int, int] | None:
+    """Дата рождения из профиля ВК: «15.4» или «15.4.1990» (год может быть скрыт)."""
+    if not bdate:
+        return None
+    parts = bdate.split(".")
+    if len(parts) < 2:
+        return None
+    return parse_day_month(f"{parts[0]}.{parts[1]}")

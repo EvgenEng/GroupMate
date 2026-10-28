@@ -27,7 +27,7 @@ OWNER_HELP = (
     "\n\n🔧 <b>Команды владельца</b>\n"
     "/bd_add ДД.ММ Имя — добавить ДР (ответом на сообщение человека — с упоминанием)\n"
     "/bd_list — все дни рождения, /bd_del ID — удалить\n"
-    "/orders — открытые заказы\n"
+    "/orders — открытые заказы (владелец и менеджеры)\n"
     "/test_morning, /test_evening — прислать сводку погоды в группу сейчас\n"
     "/test_bd — пример поздравления (вам в личку)\n"
     "/id — показать ID чата и пользователя"
@@ -42,7 +42,7 @@ def help_text(ctx: AppContext, user_id: int | None) -> str:
 @router.message(CommandStart())
 async def start(message: Message, command: CommandObject, ctx: AppContext) -> None:
     user = message.from_user
-    await ctx.db.touch_user(user.id, user.first_name, user.username)
+    await ctx.db.touch_user("tg", user.id, user.first_name, user.username)
     if command.args == "order" and message.chat.type == "private":
         await show_catalog(message, ctx)
         return

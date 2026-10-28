@@ -43,7 +43,7 @@ class LLMClient:
         self.system_prompt = system_prompt
         self.timeout = timeout
         # Короткая память диалога: последние 3 пары «вопрос–ответ» на чат.
-        self._history: dict[int, deque] = defaultdict(lambda: deque(maxlen=6))
+        self._history: dict[str, deque] = defaultdict(lambda: deque(maxlen=6))
 
     @property
     def enabled(self) -> bool:
@@ -77,8 +77,9 @@ class LLMClient:
             prompt = f"{prompt}\n\n{extra}"
         return [{"role": "system", "content": prompt}]
 
-    async def chat(self, chat_id: int, user_text: str, extra_context: str = "") -> str:
-        history = self._history[chat_id]
+    async def chat(self, chat_key: str, user_text: str, extra_context: str = "") -> str:
+        """chat_key — «tg:123» или «vk:2000000001»: у каждого чата своя короткая память."""
+        history = self._history[chat_key]
         messages = self._system(extra_context) + list(history) + [{"role": "user", "content": user_text}]
         answer = await self.complete(messages)
         history.append({"role": "user", "content": user_text})
