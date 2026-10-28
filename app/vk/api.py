@@ -69,6 +69,23 @@ class VkApi:
         return await self.call("messages.edit", peer_id=peer_id, conversation_message_id=conversation_message_id,
                                message=text, keyboard=keyboard, dont_parse_links=1)
 
+    async def upload_message_photo(self, peer_id: int, path) -> str:
+        """Загружает картинку для сообщений и возвращает вложение вида photo-1_2_key."""
+        import aiohttp
+
+        server = await self.call("photos.getMessagesUploadServer", peer_id=peer_id)
+        session = await self._http()
+        form = aiohttp.FormData()
+        with open(path, "rb") as f:
+            form.add_field("photo", f.read(), filename="catalog.jpg", content_type="image/jpeg")
+        async with session.post(server["upload_url"], data=form) as resp:
+            uploaded = await resp.json(content_type=None)
+        saved = await self.call("photos.saveMessagesPhoto", photo=uploaded["photo"],
+                                server=uploaded["server"], hash=uploaded["hash"])
+        photo = saved[0]
+        key = f"_{photo['access_key']}" if photo.get("access_key") else ""
+        return f"photo{photo['owner_id']}_{photo['id']}{key}"
+
     async def answer_event(self, event_id: str, user_id: int, peer_id: int, text: str | None = None):
         data = {"type": "show_snackbar", "text": text[:90]} if text else None
         return await self.call("messages.sendMessageEventAnswer", event_id=event_id, user_id=user_id,

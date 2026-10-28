@@ -35,6 +35,8 @@ class FakeApi:
         self.edits: list[tuple[int, int, str, dict | None]] = []
         self.snackbars: list[str | None] = []
         self.calls: list[str] = []
+        self.uploads = 0
+        self.attachments: list[tuple[int, str]] = []
 
     async def call(self, method, **params):
         self.calls.append(method)
@@ -52,6 +54,12 @@ class FakeApi:
 
     async def send(self, peer_id, text, keyboard=None, **extra):
         self.sent.append((peer_id, text, keyboard))
+        if extra.get("attachment"):
+            self.attachments.append((peer_id, extra["attachment"]))
+
+    async def upload_message_photo(self, peer_id, path):
+        self.uploads += 1
+        return "photo-239343586_1_key"
 
     async def edit(self, peer_id, cmid, text, keyboard=None):
         self.edits.append((peer_id, cmid, text, keyboard))
@@ -83,7 +91,7 @@ class VkTestCase(unittest.TestCase):
         settings = Settings(
             bot_token="", owner_id=0, group_chat_id=0, telegram_proxy="", timezone="Europe/Moscow",
             db_path=Path(self.tmp.name) / "bot.db", catalog_path=ROOT / "config" / "catalog.json",
-            holidays_path=ROOT / "config" / "holidays.json",
+            holidays_path=ROOT / "config" / "holidays.json", catalog_image=ROOT / "config" / "catalog.jpg",
             vk_token="token", vk_group_id=GROUP, vk_chat_peer_id=CHAT,
             order_notify_vk=("artdin93",), vk_admins=(str(ADMIN),),
         )
@@ -185,7 +193,8 @@ class VkScenarioTests(VkTestCase):
         self.assertIn("[id300|Пётр]", chat[0])
         self.assertTrue(any("Погода на сегодня" in t for t in chat))
         self.assertTrue(any("в личных сообщениях сообщества" in t for t in chat))
-        self.assertEqual(len(chat), 3)  # «просто болтаем» без обращения — молчим
+        # приветствие, погода, прайс + кнопка; «просто болтаем» без обращения — молчим
+        self.assertEqual(len(chat), 4)
 
     def test_llm_reply_in_chat_mentions_author(self):
         class FakeLLM:
@@ -226,6 +235,26 @@ class VkScenarioTests(VkTestCase):
         note = self.api.texts_to(MANAGER)[-1]
         self.assertIn("через «Товары»", note)
         self.assertIn("3 490 ₽", note)
+
+
+class VkCatalogImageTests(VkTestCase):
+    def test_catalog_shows_price_image_uploaded_once(self):
+        self.run_all(message(CUSTOMER, CUSTOMER, "🛍 Каталог", {"cmd": "catalog"}),
+                     event(CUSTOMER, {"a": "cats"}),                      # «⬅️ Разделы» — без картинки
+                     message(MANAGER, MANAGER, "каталог"),
+                     message(CHAT, CUSTOMER, "/каталог"),
+                     message(CHAT, CUSTOMER, "[club239343586|@gastrodomru] каталог"))
+        self.assertEqual(self.api.uploads, 1)                              # загрузили один раз, дальше кеш
+        self.assertEqual([p for p, _ in self.api.attachments], [CUSTOMER, MANAGER, CHAT, CHAT])
+        # после картинки — кнопки разделов
+        texts = self.api.texts_to(CUSTOMER)
+        self.assertEqual(texts[texts.index("📋 Наш прайс") + 1].splitlines()[0], "🛍 GASTRODOM — каталог")
+
+    def test_catalog_without_image_still_works(self):
+        self.ctx.settings.__dict__["catalog_image"] = None
+        self.run_all(message(CUSTOMER, CUSTOMER, "каталог"))
+        self.assertEqual(self.api.uploads, 0)
+        self.assertTrue(any(t.startswith("🛍 GASTRODOM") for t in self.api.texts_to(CUSTOMER)))
 
 
 class VkUnitTests(unittest.TestCase):

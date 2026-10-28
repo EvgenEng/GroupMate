@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 
 from app import keyboards as kb
 from app.context import AppContext
@@ -29,17 +29,35 @@ class Checkout(StatesGroup):
     confirm = State()
 
 
+async def send_catalog_photo(message: Message, ctx: AppContext) -> None:
+    """Картинка-прайс (config/catalog.jpg). Загружается в Telegram один раз, дальше — по file_id."""
+    path = ctx.settings.catalog_image
+    if not path or not path.exists():
+        return
+    key = f"tg:catalog_photo:{int(path.stat().st_mtime)}"
+    file_id = await ctx.db.kv_get(key)
+    try:
+        sent = await message.answer_photo(file_id or FSInputFile(path), caption="📋 Наш прайс")
+        if not file_id and sent.photo:
+            await ctx.db.kv_set(key, sent.photo[-1].file_id)
+    except Exception as exc:  # noqa: BLE001 — без картинки каталог всё равно работает
+        logger.warning("Картинка каталога не отправилась: %s", exc)
+        await ctx.db.kv_set(key, "")
+
+
 async def show_catalog(message: Message, ctx: AppContext) -> None:
     if not ctx.catalog.products:
         await message.answer("Каталог пока пуст — скоро здесь появятся товары 🙂")
         return
+    await send_catalog_photo(message, ctx)
     await message.answer(catalog_intro(ctx.catalog), reply_markup=kb.categories_kb(ctx.catalog))
 
 
 @router.message(Command("catalog", "order", "zakaz"))
 async def catalog_cmd(message: Message, ctx: AppContext) -> None:
     if message.chat.type != "private":
-        # В группе корзины не собираем — зовём в личку.
+        # В группе корзины не собираем — показываем прайс и зовём в личку.
+        await send_catalog_photo(message, ctx)
         await message.reply("Заказы оформляются в личных сообщениях со мной 👇",
                             reply_markup=kb.order_button(ctx.deep_link("order")))
         return

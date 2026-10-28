@@ -117,6 +117,7 @@ class Settings:
     db_path: Path
     catalog_path: Path
     holidays_path: Path
+    catalog_image: Path | None = None   # картинка-прайс, которую бот показывает при «Каталог»
 
     llm_providers: list[LLMProvider] = field(default_factory=list)
     llm_daily_cap: int = 30
@@ -215,6 +216,7 @@ def load_settings() -> Settings:
         db_path=_path("DB_PATH", "data/bot.db"),
         catalog_path=_path("CATALOG_PATH", "config/catalog.json"),
         holidays_path=_path("HOLIDAYS_PATH", "config/holidays.json"),
+        catalog_image=_path("CATALOG_IMAGE", "config/catalog.jpg") if _str("CATALOG_IMAGE", "x") else None,
         llm_providers=_providers(),
         llm_daily_cap=_int("LLM_DAILY_CAP", 30),
         llm_system_prompt=prompt,

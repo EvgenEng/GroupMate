@@ -262,7 +262,11 @@ class VkBot:
         elif cmd == "tomorrow":
             text = await weather_reports.evening_report(self.ctx.weather, self.ctx.today())
             await self.send(peer_id, text or "😔 Не получилось загрузить прогноз, попробуйте чуть позже.")
-        elif cmd in {"catalog", "cart", "myorders"} and chat:
+        elif cmd == "catalog" and chat:
+            await self.send_catalog_photo(peer_id)
+            await self.send(peer_id, "Заказы оформляются в личных сообщениях сообщества 👇",
+                            kb.order_link(self.ctx.messenger.vk_order_url()))
+        elif cmd in {"cart", "myorders"} and chat:
             await self.send(peer_id, "Заказы оформляются в личных сообщениях сообщества 👇",
                             kb.order_link(self.ctx.messenger.vk_order_url()))
         elif cmd == "catalog":
@@ -439,10 +443,31 @@ class VkBot:
         await self.send(peer_id, prefix + escape(answer))
 
     # ── магазин ───────────────────────────────────────────────
+    async def send_catalog_photo(self, peer_id: int) -> bool:
+        """Картинка-прайс (config/catalog.jpg). Загружается в ВК один раз, дальше берётся из кеша."""
+        path = self.ctx.settings.catalog_image
+        if not path or not path.exists():
+            return False
+        key = f"vk:catalog_photo:{int(path.stat().st_mtime)}"  # заменили картинку — загрузим заново
+        for attempt in range(2):
+            attachment = await self.ctx.db.kv_get(key)
+            try:
+                if not attachment:
+                    attachment = await self.api.upload_message_photo(peer_id, path)
+                    await self.ctx.db.kv_set(key, attachment)
+                await self.api.send(peer_id, "📋 Наш прайс", attachment=attachment)
+                return True
+            except Exception as exc:  # noqa: BLE001 — без картинки каталог всё равно работает
+                logger.warning("ВК: картинка каталога не отправилась (%s)", exc)
+                await self.ctx.db.kv_set(key, "")  # сбросим кеш и попробуем загрузить заново
+        return False
+
     async def show_catalog(self, user_id: int, cmid: int | None = None) -> None:
         if not self.ctx.catalog.products:
             await self.send(user_id, "Каталог пока пуст — скоро здесь появятся товары 🙂")
             return
+        if cmid is None:  # новое сообщение (кнопка меню), а не «⬅️ Разделы» внутри каталога
+            await self.send_catalog_photo(user_id)
         await self.edit_or_send(user_id, cmid, catalog_intro(self.ctx.catalog), kb.categories(self.ctx.catalog))
 
     async def show_cart(self, user_id: int, cmid: int | None) -> None:
