@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 from app.config import Settings
-from app.core.orders import Catalog, OrderView, STATUS_FOR_CUSTOMER, format_order
+from app.core.orders import Catalog, OrderView, STATUS_FOR_CUSTOMER, format_manager_order
 from app.services.db import Database
 from app.vk import keyboards as vk_kb
 from app.vk.format import html_to_vk
@@ -115,7 +115,7 @@ class Messenger:
             from app import keyboards as tg_kb
             tg_markup = tg_kb.order_button(self.tg_order_url())
         await self._tg_send(self.settings.group_chat_id, html, tg_markup)
-        vk_keyboard = vk_kb.order_link(self.vk_order_url()) if order_button else None
+        vk_keyboard = vk_kb.chat_catalog() if order_button else None
         await self._vk_send(self.settings.vk_chat_peer_id, html, vk_keyboard)
 
     async def to_admins(self, html: str) -> None:
@@ -125,9 +125,14 @@ class Messenger:
             await self._vk_send(uid, html)
 
     # ── заказы ───────────────────────────────────────────────
+    async def manager_text(self, order: OrderView) -> str:
+        """Текст заказа для менеджера (с днём рождения покупателя, если он известен)."""
+        bd = await self.db.birthday_of(order.platform, order.user_id)
+        return format_manager_order(order, self.catalog.currency, bd.date_text() if bd else None)
+
     async def notify_new_order(self, order: OrderView) -> int:
         """Шлёт заказ всем менеджерам с кнопками статусов. Возвращает, скольким дошло."""
-        text = "🔔 <b>Новый заказ!</b>\n\n" + format_order(order, self.catalog.currency, for_owner=True)
+        text = await self.manager_text(order)
         delivered = 0
         if self.tg is not None:
             from app import keyboards as tg_kb

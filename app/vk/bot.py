@@ -35,7 +35,6 @@ PHRASES = {
     "start": {"начать", "start", "старт", "меню"},
     "help": {"help", "помощь", "команды", "что ты умеешь"},
     "weather": {"погода", "weather", "pogoda", "какая погода", "погода сегодня"},
-    "tomorrow": {"tomorrow", "завтра", "погода завтра", "погода на завтра", "какая погода завтра"},
     "catalog": {"catalog", "каталог", "заказ", "order", "заказать", "сделать заказ"},
     "cart": {"cart", "корзина"},
     "myorders": {"myorders", "мои заказы"},
@@ -45,6 +44,7 @@ PHRASES = {
     "orders": {"orders", "заказы"},
 }
 ARG_COMMANDS = {"mybd": "mybd", "др": "mybd", "bd_add": "bd_add", "bd_del": "bd_del"}
+CHECKOUT_BUTTONS = {"no_comment", "use_name", "use_phone", "skip_bd"}
 ADMIN_COMMANDS = {"test_morning", "test_evening", "test_bd", "bd_list", "bd_sync", "bd_add", "bd_del"}
 
 WELCOMES = [
@@ -199,7 +199,7 @@ class VkBot:
             await self.on_first_contact(from_id)
             state = self.checkout.get(from_id)
             menu_press = bool(payload) and (payload.get("command") == "start"
-                                            or payload.get("cmd") not in (None, "no_comment"))
+                                            or payload.get("cmd") not in (None, *CHECKOUT_BUTTONS))
             if state and menu_press:
                 self.checkout.pop(from_id, None)  # ушли в меню — оформление прерываем, корзина остаётся
             elif state:
@@ -247,10 +247,11 @@ class VkBot:
         if target and peer_id != target:
             return
         name = self.mention(member, (await self.user(member)).get("first_name", "друг"))
+        shop = self.ctx.catalog.shop.name or "сообщества"
         text = (random.choice(WELCOMES).format(name=name)
-                + "\n\nЯ бот сообщества: по утрам рассказываю о погоде, поздравляю с днём рождения "
-                  "и принимаю заказы в личных сообщениях сообщества 🛍")
-        await self.send(peer_id, text, kb.order_link(self.ctx.messenger.vk_order_url()))
+                + f"\n\nЯ бот {escape(shop)}: принимаю заказы на наши деликатесы и поздравляю "
+                  "с днём рождения 🎂 Каталог — по кнопке ниже.")
+        await self.send(peer_id, text, kb.chat_catalog())
 
     # ── команды ───────────────────────────────────────────────
     async def dispatch(self, cmd: str, arg: str, peer_id: int, user_id: int, chat: bool, reply: dict) -> None:
@@ -259,16 +260,11 @@ class VkBot:
         elif cmd == "weather":
             text = await weather_reports.now_report(self.ctx.weather, self.ctx.today())
             await self.send(peer_id, text or "😔 Не получилось загрузить прогноз, попробуйте чуть позже.")
-        elif cmd == "tomorrow":
-            text = await weather_reports.evening_report(self.ctx.weather, self.ctx.today())
-            await self.send(peer_id, text or "😔 Не получилось загрузить прогноз, попробуйте чуть позже.")
         elif cmd == "catalog" and chat:
             await self.send_catalog_photo(peer_id)
-            await self.send(peer_id, "Заказы оформляются в личных сообщениях сообщества 👇",
-                            kb.order_link(self.ctx.messenger.vk_order_url()))
+            await self.send(peer_id, "Нажмите кнопку — пришлю каталог вам в личные сообщения 👇", kb.chat_catalog())
         elif cmd in {"cart", "myorders"} and chat:
-            await self.send(peer_id, "Заказы оформляются в личных сообщениях сообщества 👇",
-                            kb.order_link(self.ctx.messenger.vk_order_url()))
+            await self.send(peer_id, "Заказы оформляются в личных сообщениях сообщества 👇", kb.chat_catalog())
         elif cmd == "catalog":
             await self.show_catalog(user_id)
         elif cmd == "cart":
@@ -291,8 +287,8 @@ class VkBot:
         elif cmd in ADMIN_COMMANDS:
             if await self.is_admin(user_id):
                 await self.admin_command(cmd, arg, peer_id, reply)
-        elif cmd == "no_comment":
-            pass  # кнопка «Без комментария» вне оформления — игнорируем
+        elif cmd in CHECKOUT_BUTTONS:
+            pass  # кнопки оформления, нажатые уже после него, — игнорируем
 
     async def cmd_start(self, user_id: int, force: bool = False) -> None:
         now = asyncio.get_running_loop().time()
@@ -304,20 +300,18 @@ class VkBot:
         lines = [f"Здравствуйте{', ' + escape(name) if name else ''}! 👋"]
         if shop.name:
             lines.append(f"Я бот {escape(shop.name)}. {escape(shop.about)}")
-        lines += ["", "Что умею:",
-                  "🛍 Каталог и заказ — прямо здесь, кнопками",
-                  "🌤 Погода в Москве и области — сегодня и на завтра",
-                  "🎂 Поздравляю с днём рождения в беседе",
-                  "💬 Могу просто поболтать — пишите что угодно",
-                  "", "Меню — на кнопках внизу 👇"]
+        lines += ["", "🛍 Каталог и заказ — прямо здесь, кнопками",
+                  "🎂 Именинников поздравляем и готовим приятный бонус к заказу"]
+        if self.ctx.llm.enabled:
+            lines.append("💬 Можно задать вопрос — отвечу")
+        lines += ["", "Меню — на кнопках внизу 👇"]
         await self.send(user_id, "\n".join(lines), kb.main_menu())
 
     async def cmd_help(self, peer_id: int) -> None:
         await self.send(peer_id, "👋 Я бот сообщества.\n\n"
-                                 "В беседе: «погода», «погода завтра», «дни рождения», «каталог» — "
-                                 "или обратитесь ко мне через @, и я отвечу.\n"
+                                 "В беседе: «каталог», «дни рождения», «погода».\n"
                                  "Заказы и запись дня рождения — в личных сообщениях сообщества 👇",
-                        kb.order_link(self.ctx.messenger.vk_order_url(), "💬 Написать боту"))
+                        kb.chat_catalog())
 
     async def cmd_mybd_help(self, peer_id: int, user_id: int) -> None:
         mine = await self.ctx.db.birthday_of(PLATFORM, user_id)
@@ -358,8 +352,7 @@ class VkBot:
             await self.send(peer_id, "Открытых заказов нет 👌")
             return
         for o in orders:
-            await self.send(peer_id, format_order(o, self.ctx.catalog.currency, for_owner=True),
-                            kb.order_status(o.id))
+            await self.send(peer_id, await self.ctx.messenger.manager_text(o), kb.order_status(o.id))
 
     async def admin_command(self, cmd: str, arg: str, peer_id: int, reply: dict) -> None:
         ctx = self.ctx
@@ -462,6 +455,19 @@ class VkBot:
                 await self.ctx.db.kv_set(key, "")  # сбросим кеш и попробуем загрузить заново
         return False
 
+    async def dm_catalog(self, user_id: int) -> bool:
+        """Каталог в личку по кнопке из беседы. False — человек ещё не разрешил сообщения."""
+        try:
+            allowed = await self.api.call("messages.isMessagesFromGroupAllowed",
+                                          group_id=self.group_id, user_id=user_id)
+            if not (allowed or {}).get("is_allowed"):
+                return False
+        except VkApiError as exc:
+            logger.debug("ВК: isMessagesFromGroupAllowed: %s", exc)
+            return False
+        await self.show_catalog(user_id)
+        return True
+
     async def show_catalog(self, user_id: int, cmid: int | None = None) -> None:
         if not self.ctx.catalog.products:
             await self.send(user_id, "Каталог пока пуст — скоро здесь появятся товары 🙂")
@@ -491,8 +497,16 @@ class VkBot:
         snackbar = None
         catalog = self.ctx.catalog
 
+        link = None
         if action == "ost":
             snackbar = await self.change_status(user_id, peer_id, cmid, payload)
+        elif action == "dm_catalog":
+            # Кнопка в беседе: шлём каталог человеку в личку. Если он ещё не писал сообществу,
+            # ВК не даст написать первыми — тогда открываем диалог с сообществом.
+            if await self.dm_catalog(user_id):
+                snackbar = "Отправил каталог вам в личные сообщения 📩"
+            else:
+                link = self.ctx.messenger.vk_order_url()
         elif is_chat(peer_id):
             snackbar = "Каталог и корзина — в личных сообщениях сообщества"
         elif action == "cats":
@@ -525,9 +539,7 @@ class VkBot:
             await self.show_cart(user_id, cmid)
         elif action == "checkout":
             if await self.ctx.orders.lines(PLATFORM, user_id):
-                self.checkout[user_id] = {"step": "phone"}
-                await self.send(user_id, "📞 Напишите, пожалуйста, телефон для связи — например, +7 999 123-45-67",
-                                kb.phone_cancel())
+                await self.ask_name(user_id)
             else:
                 snackbar = "Корзина пуста"
         elif action == "co_ok":
@@ -536,32 +548,67 @@ class VkBot:
             self.checkout.pop(user_id, None)
             await self.send(user_id, "Оформление отменено. Корзина сохранена 🛒", kb.main_menu())
         try:
-            await self.api.answer_event(event_id, user_id, peer_id, snackbar)
+            await self.api.answer_event(event_id, user_id, peer_id, snackbar, link=link)
         except VkApiError as exc:
             logger.debug("ВК: ответ на нажатие: %s", exc)
 
+    # ── оформление: ФИО → телефон → пожелания → подтверждение → (день рождения) ──
+    async def contact(self, user_id: int) -> dict:
+        return await self.ctx.db.kv_get(f"contact:vk:{user_id}", {}) or {}
+
+    async def ask_name(self, user_id: int) -> None:
+        saved = (await self.contact(user_id)).get("name")
+        u = await self.user(user_id)
+        profile = " ".join(x for x in (u.get("last_name"), u.get("first_name")) if x)
+        suggested = saved or (profile if u.get("last_name") and u.get("first_name") else "")
+        self.checkout[user_id] = {"step": "name", "suggested": suggested}
+        text = "👤 Напишите, пожалуйста, фамилию и имя — так мы оформим заказ."
+        if suggested:
+            text += f"\n\nИли нажмите кнопку, если верно: {escape(suggested)}"
+        await self.send(user_id, text, kb.name_choice(suggested))
+
     async def checkout_input(self, user_id: int, text: str, payload: dict | None) -> None:
         state = self.checkout[user_id]
+        cmd = (payload or {}).get("cmd")
         text = text.strip()
         if text.lower() in {"отмена", "отменить", "/cancel"}:
             self.checkout.pop(user_id, None)
             await self.send(user_id, "Оформление отменено. Корзина сохранена 🛒", kb.main_menu())
             return
-        if state["step"] == "phone":
-            if not PHONE_RE.match(text):
-                await self.send(user_id, "Не похоже на номер 🤔 Напишите, например: +7 999 123-45-67", kb.phone_cancel())
+        step = state["step"]
+        if step == "name":
+            name = state.get("suggested", "") if cmd == "use_name" else " ".join(text.split())
+            if len(name.split()) < 2 or len(name) > 80 or any(ch.isdigit() for ch in name):
+                await self.send(user_id, "Напишите, пожалуйста, фамилию и имя — например: Иванова Мария",
+                                kb.name_choice(state.get("suggested", "")))
                 return
-            state.update(step="comment", phone=text)
+            saved_phone = (await self.contact(user_id)).get("phone", "")
+            state.update(step="phone", name=name, saved_phone=saved_phone)
+            await self.send(user_id, "📞 Напишите телефон для связи — например, +7 999 123-45-67",
+                            kb.phone_cancel(saved_phone))
+        elif step == "phone":
+            phone = state.get("saved_phone", "") if cmd == "use_phone" else text
+            if not phone or not PHONE_RE.match(phone):
+                await self.send(user_id, "Не похоже на номер 🤔 Напишите, например: +7 999 123-45-67",
+                                kb.phone_cancel(state.get("saved_phone", "")))
+                return
+            state.update(step="comment", phone=phone)
             await self.send(user_id, checkout_comment_hint(self.ctx.catalog), kb.comment_skip())
-        elif state["step"] == "comment":
-            skip = (payload or {}).get("cmd") == "no_comment" or text == "Без комментария"
+        elif step == "comment":
+            skip = cmd == "no_comment" or text == "Без комментария"
             state.update(step="confirm", comment="" if skip else text[:500])
             lines = await self.ctx.orders.lines(PLATFORM, user_id)
             if not lines:
                 self.checkout.pop(user_id, None)
                 await self.send(user_id, "Корзина опустела 🤷 Загляните в каталог.", kb.main_menu())
                 return
-            await self.send(user_id, format_cart(lines, self.ctx.catalog.currency) + "\n\nВсё верно?", kb.confirm())
+            summary = (format_cart(lines, self.ctx.catalog.currency)
+                       + f"\n\n👤 {escape(state['name'])}\n📞 {escape(state['phone'])}")
+            if state["comment"]:
+                summary += f"\n💬 {escape(state['comment'])}"
+            await self.send(user_id, summary + "\n\nВсё верно?", kb.confirm())
+        elif step == "birthday":
+            await self.birthday_input(user_id, text, cmd)
         else:
             await self.send(user_id, "Нажмите «✅ Подтвердить» или «❌ Отмена» под сообщением с заказом.", kb.confirm())
 
@@ -570,14 +617,44 @@ class VkBot:
         if not state or state.get("step") != "confirm":
             return
         u = await self.user(user_id)
-        order = await self.ctx.orders.place(PLATFORM, user_id, await self.full_name(user_id), u.get("screen_name"),
-                                            state.get("phone", ""), state.get("comment", ""))
+        order = await self.ctx.orders.place(PLATFORM, user_id, state["name"], u.get("screen_name"),
+                                            state["phone"], state.get("comment", ""))
         if not order:
             await self.send(user_id, "Корзина пуста 🤷", kb.main_menu())
             return
+        await self.ctx.db.kv_set(f"contact:vk:{user_id}", {"name": state["name"], "phone": state["phone"]})
         await self.send(user_id, f"🎉 Заказ №{order.id} оформлен! Мы скоро свяжемся с вами.\n\n"
                         + format_order(order, self.ctx.catalog.currency), kb.main_menu())
         await self.ctx.messenger.notify_new_order(order)
+        await self.offer_birthday(user_id, state["name"])
+
+    async def offer_birthday(self, user_id: int, name: str) -> None:
+        """Нет даты рождения ни в базе, ни в профиле — предлагаем указать (подарок/бонус)."""
+        if await self.ctx.db.birthday_of(PLATFORM, user_id):
+            return
+        parsed = bd.parse_vk_bdate((await self.user(user_id)).get("bdate"))
+        if parsed:
+            await self.ctx.db.add_birthday(name, parsed[0], parsed[1], PLATFORM, user_id)
+            return
+        self.checkout[user_id] = {"step": "birthday", "name": name}
+        await self.send(user_id, self.ctx.catalog.shop.birthday_offer or bd.DEFAULT_BIRTHDAY_OFFER,
+                        kb.birthday_skip())
+
+    async def birthday_input(self, user_id: int, text: str, cmd: str | None) -> None:
+        state = self.checkout[user_id]
+        if cmd == "skip_bd" or text.lower() in {"пропустить", "нет", "не надо"}:
+            self.checkout.pop(user_id, None)
+            await self.send(user_id, "Хорошо! Если передумаете — напишите «др 15.04» 🙂", kb.main_menu())
+            return
+        parsed = bd.parse_vk_bdate(text.replace("/", ".").replace("-", ".").replace(" ", "."))
+        if not parsed:
+            await self.send(user_id, "Напишите дату так: 15.04 (день и месяц) — или нажмите «Пропустить».",
+                            kb.birthday_skip())
+            return
+        self.checkout.pop(user_id, None)
+        await self.ctx.db.add_birthday(state["name"], parsed[0], parsed[1], PLATFORM, user_id)
+        await self.send(user_id, f"🎂 Записал: {parsed[0]} {bd.MONTHS_RU[parsed[1] - 1]}. "
+                                 "Будем ждать вас с поздравлениями! 🎁", kb.main_menu())
 
     async def change_status(self, user_id: int, peer_id: int, cmid: int | None, payload: dict) -> str:
         if not await self.is_manager(user_id):
@@ -588,7 +665,7 @@ class VkBot:
         order = await self.ctx.orders.set_status(int(payload.get("o", 0)), status)
         if not order:
             return "Заказ не найден"
-        await self.edit_or_send(peer_id, cmid, format_order(order, self.ctx.catalog.currency, for_owner=True),
+        await self.edit_or_send(peer_id, cmid, await self.ctx.messenger.manager_text(order),
                                 kb.order_status(order.id))
         await self.ctx.messenger.notify_customer(order)
         return f"Статус: {STATUSES[status]}"

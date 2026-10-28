@@ -86,8 +86,12 @@ class VkApi:
         key = f"_{photo['access_key']}" if photo.get("access_key") else ""
         return f"photo{photo['owner_id']}_{photo['id']}{key}"
 
-    async def answer_event(self, event_id: str, user_id: int, peer_id: int, text: str | None = None):
-        data = {"type": "show_snackbar", "text": text[:90]} if text else None
+    async def answer_event(self, event_id: str, user_id: int, peer_id: int, text: str | None = None,
+                           link: str | None = None):
+        if link:
+            data = {"type": "open_link", "link": link}
+        else:
+            data = {"type": "show_snackbar", "text": text[:90]} if text else None
         return await self.call("messages.sendMessageEventAnswer", event_id=event_id, user_id=user_id,
                                peer_id=peer_id, event_data=data)
 

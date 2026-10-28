@@ -41,6 +41,7 @@ class Shop:
     about: str = ""
     lead_time: str = ""
     footnote: str = ""
+    birthday_offer: str = ""   # текст-предложение указать день рождения после заказа
 
 
 @dataclass
@@ -66,7 +67,8 @@ class Catalog:
                 step=float(p.get("step", 1)) or 1.0,
             ) for p in data.get("products", [])],
             shop=Shop(name=shop.get("name", ""), about=shop.get("about", ""),
-                      lead_time=shop.get("lead_time", ""), footnote=shop.get("footnote", "")),
+                      lead_time=shop.get("lead_time", ""), footnote=shop.get("footnote", ""),
+                      birthday_offer=shop.get("birthday_offer", "")),
         )
 
     def product(self, product_id: str) -> Product | None:
@@ -225,6 +227,23 @@ def format_order(o: OrderView, currency: str, for_owner: bool = False) -> str:
     if o.comment:
         rows.append(f"💬 {escape(o.comment)}")
     rows.append(f"🕒 {escape(o.created_at)}")
+    return "\n".join(rows)
+
+
+def format_manager_order(o: OrderView, currency: str, birthday: str | None = None) -> str:
+    """Заказ для менеджера: позиции и количество, ФИО, телефон."""
+    rows = [f"🔔 <b>Заказ №{o.id}</b> — {STATUSES.get(o.status, o.status)}", ""]
+    for name, qty, _price, unit in o.items:
+        rows.append(f"• {escape(name)} — {fmt_qty(qty)} {escape(unit)}")
+    approx = has_weight_items(unit for *_, unit in o.items)
+    rows += ["", f"💰 {'≈ ' if approx else ''}{money(o.total, currency)}", "",
+             f"👤 {customer_link(o.platform, o.user_id, o.customer_name, o.username)}",
+             f"📞 {escape(o.phone)}"]
+    if birthday:
+        rows.append(f"🎂 День рождения: {escape(birthday)}")
+    if o.comment:
+        rows.append(f"💬 {escape(o.comment)}")
+    rows.append(f"🕒 {escape(o.created_at)} · {PLATFORM_NAMES.get(o.platform, o.platform)}")
     return "\n".join(rows)
 
 

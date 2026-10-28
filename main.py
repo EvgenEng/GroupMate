@@ -40,7 +40,6 @@ async def run_telegram(ctx: AppContext) -> None:
                        group.router, inline.router, chat.router)
     await bot.set_my_commands([
         BotCommand(command="weather", description="🌤 Погода на сегодня"),
-        BotCommand(command="tomorrow", description="🌙 Погода на завтра"),
         BotCommand(command="catalog", description="🛍 Каталог и заказ"),
         BotCommand(command="cart", description="🛒 Корзина"),
         BotCommand(command="myorders", description="🧾 Мои заказы"),

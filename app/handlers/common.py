@@ -13,8 +13,8 @@ router = Router(name="common")
 
 HELP = (
     "👋 <b>Что я умею</b>\n\n"
-    "🌤 <b>Погода</b> — утром присылаю прогноз на день по Москве и области, вечером — на завтра, "
-    "а днём предупреждаю, если погода резко меняется. По запросу: /weather или слово «погода».\n\n"
+    "🌤 <b>Погода</b> — утром присылаю прогноз на день по Москве и области "
+    "и предупреждаю, если погода резко меняется. По запросу: /weather или слово «погода».\n\n"
     "🎂 <b>Дни рождения</b> — поздравляю участников группы. Сообщите мне свою дату: "
     "<code>/mybd 15.04</code>. Ближайшие праздники: /birthdays\n\n"
     "🛍 <b>Заказы</b> — /catalog, корзина: /cart, мои заказы: /myorders\n\n"
@@ -68,12 +68,6 @@ async def _weather_answer(message: Message, ctx: AppContext) -> None:
 @router.message(Command("weather", "pogoda"))
 async def weather_cmd(message: Message, ctx: AppContext) -> None:
     await _weather_answer(message, ctx)
-
-
-@router.message(Command("tomorrow"))
-async def tomorrow_cmd(message: Message, ctx: AppContext) -> None:
-    text = await weather_reports.evening_report(ctx.weather, ctx.today())
-    await message.answer(text or "😔 Не получилось загрузить прогноз, попробуйте чуть позже.")
 
 
 @router.message(F.text.lower().in_({"погода", "погода?", "какая погода", "какая погода?"}))

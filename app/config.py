@@ -127,6 +127,7 @@ class Settings:
     weather_locations: list[Location] = field(default_factory=list)
     weather_morning: tuple[int, int] = (7, 0)
     weather_evening: tuple[int, int] = (21, 0)
+    weather_evening_enabled: bool = False   # «погода на завтра» вечером — выключена по умолчанию
     weather_alerts_enabled: bool = True
     weather_alerts_from: int = 9
     weather_alerts_to: int = 21
@@ -224,6 +225,7 @@ def load_settings() -> Settings:
         weather_locations=parse_locations(_str("WEATHER_LOCATIONS") or DEFAULT_LOCATIONS),
         weather_morning=_time("WEATHER_MORNING_TIME", "07:00"),
         weather_evening=_time("WEATHER_EVENING_TIME", "21:00"),
+        weather_evening_enabled=_bool("WEATHER_EVENING_ENABLED", False),
         weather_alerts_enabled=_bool("WEATHER_ALERTS_ENABLED", True),
         weather_alerts_from=_int("WEATHER_ALERTS_FROM_HOUR", 9),
         weather_alerts_to=_int("WEATHER_ALERTS_TO_HOUR", 21),

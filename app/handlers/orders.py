@@ -197,7 +197,7 @@ async def order_status(call: CallbackQuery, callback_data: kb.OrderStatus, ctx: 
     if not order:
         await call.answer("Заказ не найден", show_alert=True)
         return
-    await _edit(call, format_order(order, ctx.catalog.currency, for_owner=True), kb.owner_order_kb(order.id))
+    await _edit(call, await ctx.messenger.manager_text(order), kb.owner_order_kb(order.id))
     await call.answer(f"Статус: {STATUSES[callback_data.status]}")
     await ctx.messenger.notify_customer(order)
 
@@ -220,5 +220,4 @@ async def all_orders(message: Message, ctx: AppContext) -> None:
         await message.answer("Открытых заказов нет 👌")
         return
     for o in orders:
-        await message.answer(format_order(o, ctx.catalog.currency, for_owner=True),
-                             reply_markup=kb.owner_order_kb(o.id))
+        await message.answer(await ctx.messenger.manager_text(o), reply_markup=kb.owner_order_kb(o.id))

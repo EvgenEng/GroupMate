@@ -52,17 +52,16 @@ def inline(rows: list[list[dict]]) -> dict:
 MENU_COMMANDS = {
     "🛍 Каталог": "catalog",
     "🛒 Корзина": "cart",
-    "🌤 Погода": "weather",
-    "🌙 Погода на завтра": "tomorrow",
     "🧾 Мои заказы": "myorders",
     "🎂 Мой день рождения": "mybd_help",
+    "🌤 Погода": "weather",
     "ℹ️ Помощь": "help",
 }
 
 
 def main_menu() -> dict:
     labels = list(MENU_COMMANDS)
-    rows = [labels[0:2], labels[2:4], labels[4:6], labels[6:7]]
+    rows = [labels[0:2], labels[2:4], labels[4:6]]
     return {"one_time": False, "buttons": [
         [text(label, {"cmd": MENU_COMMANDS[label]}, "primary" if MENU_COMMANDS[label] == "catalog" else None)
          for label in row] for row in rows]}
@@ -134,8 +133,28 @@ def comment_skip() -> dict:
                    [callback("❌ Отменить оформление", {"a": "co_cancel"}, "negative")]])
 
 
-def phone_cancel() -> dict:
-    return inline([[callback("❌ Отменить оформление", {"a": "co_cancel"}, "negative")]])
+CANCEL_CHECKOUT = {"a": "co_cancel"}
+
+
+def phone_cancel(saved_phone: str = "") -> dict:
+    rows = [[text(f"📞 {saved_phone}", {"cmd": "use_phone"})]] if saved_phone else []
+    rows.append([callback("❌ Отменить оформление", CANCEL_CHECKOUT, "negative")])
+    return inline(rows)
+
+
+def name_choice(suggested: str = "") -> dict:
+    rows = [[text(f"✅ {suggested}", {"cmd": "use_name"}, "positive")]] if suggested else []
+    rows.append([callback("❌ Отменить оформление", CANCEL_CHECKOUT, "negative")])
+    return inline(rows)
+
+
+def birthday_skip() -> dict:
+    return inline([[text("Пропустить", {"cmd": "skip_bd"})]])
+
+
+def chat_catalog(label: str = "🛍 Каталог и заказ") -> dict:
+    """Кнопка в беседе: бот присылает каталог человеку в личку — без перехода по ссылке."""
+    return inline([[callback(label, {"a": "dm_catalog"}, "positive")]])
 
 
 def confirm() -> dict:

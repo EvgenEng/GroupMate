@@ -36,6 +36,8 @@ class FakeApi:
         self.snackbars: list[str | None] = []
         self.calls: list[str] = []
         self.uploads = 0
+        self.links: list[str | None] = []
+        self.allowed = {CUSTOMER, MANAGER, ADMIN}
         self.attachments: list[tuple[int, str]] = []
 
     async def call(self, method, **params):
@@ -48,6 +50,8 @@ class FakeApi:
             return {"type": "user", "object_id": found[0]} if found else []
         if method == "groups.getById":
             return {"groups": [{"id": GROUP, "name": "GASTRODOM", "screen_name": "gastrodomru"}]}
+        if method == "messages.isMessagesFromGroupAllowed":
+            return {"is_allowed": int(params["user_id"] in self.allowed)}
         if method == "messages.getConversationMembers":
             return {"items": [], "profiles": [USERS[STRANGER], USERS[MANAGER]]}
         return 1
@@ -64,8 +68,9 @@ class FakeApi:
     async def edit(self, peer_id, cmid, text, keyboard=None):
         self.edits.append((peer_id, cmid, text, keyboard))
 
-    async def answer_event(self, event_id, user_id, peer_id, text=None):
+    async def answer_event(self, event_id, user_id, peer_id, text=None, link=None):
         self.snackbars.append(text)
+        self.links.append(link)
 
     def texts_to(self, peer_id) -> list[str]:
         return [t for p, t, _ in self.sent if p == peer_id]
@@ -141,6 +146,8 @@ class VkScenarioTests(VkTestCase):
             event(CUSTOMER, {"a": "add", "v": "set-intro"}),
             event(CUSTOMER, {"a": "cart"}),
             event(CUSTOMER, {"a": "checkout"}),
+            message(CUSTOMER, CUSTOMER, "Оля"),                                   # одно слово — переспросим
+            message(CUSTOMER, CUSTOMER, "✅ Смирнова Ольга", {"cmd": "use_name"}),  # ФИО из профиля кнопкой
             message(CUSTOMER, CUSTOMER, "не скажу"),
             message(CUSTOMER, CUSTOMER, "+7 999 123-45-67"),
             message(CUSTOMER, CUSTOMER, "Без комментария", {"cmd": "no_comment"}),
@@ -152,17 +159,22 @@ class VkScenarioTests(VkTestCase):
         self.assertIn("Шейка классическая в/к — 1,5 кг", cart_edit)
         self.assertIn("≈ 5 040 ₽", cart_edit)
         customer = self.api.texts_to(CUSTOMER)
+        self.assertTrue(any(t.startswith("Напишите, пожалуйста, фамилию и имя") for t in customer))
         self.assertTrue(any(t.startswith("Не похоже на номер") for t in customer))
         self.assertTrue(any("Заказ №1 оформлен" in t for t in customer))
-        # Менеджер (vk.ru/artdin93) получил уведомление с кнопками статусов
+        self.assertFalse(any("дату вашего дня рождения" in t for t in customer))  # дата уже есть из профиля
+        # Менеджер (vk.ru/artdin93): позиции — количество — ФИО — телефон, кнопки статусов
         note = [(t, k) for p, t, k in self.api.sent if p == MANAGER]
         self.assertEqual(len(note), 1)
-        self.assertIn("Новый заказ", note[0][0])
-        self.assertIn("[id100|Ольга Смирнова]", note[0][0])
-        self.assertIn("+7 999 123-45-67", note[0][0])
+        text = note[0][0]
+        self.assertIn("• Шейка классическая в/к — 1,5 кг", text)
+        self.assertIn("• Набор «Знакомство с GASTRODOM» — 1 шт", text)
+        self.assertIn("👤 [id100|Смирнова Ольга]", text)
+        self.assertIn("📞 +7 999 123-45-67", text)
+        self.assertIn("🎂 День рождения: 15 апреля", text)
         self.assertIn("ost", json.dumps(note[0][1]))
         order = asyncio.run(self.ctx.db.order(1))
-        self.assertEqual((order.platform, order.total), ("vk", 1700 * 1.5 + 2490))
+        self.assertEqual((order.platform, order.total, order.customer_name), ("vk", 1700 * 1.5 + 2490, "Смирнова Ольга"))
         self.assertEqual(asyncio.run(self.ctx.db.cart("vk", CUSTOMER)), {})
 
         # Чужой не может менять статус, менеджер — может; покупателю приходит сообщение
@@ -171,6 +183,36 @@ class VkScenarioTests(VkTestCase):
         self.assertEqual(self.api.snackbars[-2], "Только для менеджеров")
         self.assertEqual(asyncio.run(self.ctx.db.order(1)).status, "accepted")
         self.assertTrue(any("принят в работу" in t for t in self.api.texts_to(CUSTOMER)))
+
+    def test_repeat_order_offers_saved_contacts_and_asks_birthday(self):
+        buyer = 400  # профиль без фамилии и без даты рождения
+        flow = [event(buyer, {"a": "add", "v": "set-week"}), event(buyer, {"a": "checkout"}),
+                message(buyer, buyer, "Петров Иван"), message(buyer, buyer, "89991112233"),
+                message(buyer, buyer, "к субботе"), event(buyer, {"a": "co_ok"})]
+        self.run_all(*flow)
+        texts = self.api.texts_to(buyer)
+        self.assertTrue(any("дату вашего дня рождения" in t for t in texts))
+        self.run_all(message(buyer, buyer, "3.04"))
+        self.assertEqual(asyncio.run(self.ctx.db.birthday_of("vk", buyer)).name, "Петров Иван")
+        # повторный заказ: кнопки с сохранёнными ФИО и телефоном
+        self.api.sent.clear()
+        self.run_all(event(buyer, {"a": "add", "v": "set-week"}), event(buyer, {"a": "checkout"}),
+                     message(buyer, buyer, "✅ Петров Иван", {"cmd": "use_name"}))
+        boards = json.dumps([k for p, _, k in self.api.sent if p == buyer], ensure_ascii=False)
+        self.assertIn("✅ Петров Иван", boards)
+        self.assertIn("📞 89991112233", boards)
+        self.run_all(message(buyer, buyer, "📞 89991112233", {"cmd": "use_phone"}),
+                     message(buyer, buyer, "Без комментария", {"cmd": "no_comment"}), event(buyer, {"a": "co_ok"}))
+        self.assertEqual(asyncio.run(self.ctx.db.order(2)).phone, "89991112233")
+        self.assertFalse(any("дату вашего дня рождения" in t for t in self.api.texts_to(buyer)))
+
+    def test_chat_catalog_button_sends_to_dm_or_opens_dialog(self):
+        self.run_all(event(CUSTOMER, {"a": "dm_catalog"}, peer_id=CHAT),
+                     event(STRANGER, {"a": "dm_catalog"}, peer_id=CHAT))
+        self.assertTrue(any(t.startswith("🛍 GASTRODOM") for t in self.api.texts_to(CUSTOMER)))
+        self.assertEqual(self.api.snackbars[0], "Отправил каталог вам в личные сообщения 📩")
+        self.assertEqual(self.api.texts_to(STRANGER), [])
+        self.assertEqual(self.api.links[1], "https://vk.me/gastrodomru")
 
     def test_menu_button_interrupts_checkout(self):
         self.run_all(event(CUSTOMER, {"a": "add", "v": "neck"}),
@@ -192,7 +234,7 @@ class VkScenarioTests(VkTestCase):
         self.assertEqual(len(self.api.texts_to(CHAT + 5)), 0)   # чужая беседа — не здороваемся
         self.assertIn("[id300|Пётр]", chat[0])
         self.assertTrue(any("Погода на сегодня" in t for t in chat))
-        self.assertTrue(any("в личных сообщениях сообщества" in t for t in chat))
+        self.assertTrue(any("каталог вам в личные сообщения" in t for t in chat))
         # приветствие, погода, прайс + кнопка; «просто болтаем» без обращения — молчим
         self.assertEqual(len(chat), 4)
 
@@ -262,7 +304,7 @@ class VkUnitTests(unittest.TestCase):
         cases = {
             ("Начать", '{"command":"start"}'): ("start", ""),
             ("погода", None): ("weather", ""),
-            ("Погода завтра!", None): ("tomorrow", ""),
+            ("Погода завтра!", None): (None, ""),     # «погоду на завтра» убрали
             ("/mybd 15.04", None): ("mybd", "15.04"),
             ("др 15.04", None): ("mybd", "15.04"),
             ("др у Маши когда?", None): (None, ""),

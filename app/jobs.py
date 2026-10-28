@@ -92,7 +92,8 @@ def register(scheduler: Scheduler, ctx: AppContext) -> None:
     s = ctx.settings
     if s.weather_enabled:
         scheduler.daily("Погода утром", s.weather_morning, lambda now: weather_morning(ctx, now))
-        scheduler.daily("Погода вечером", s.weather_evening, lambda now: weather_evening(ctx, now))
+        if s.weather_evening_enabled:
+            scheduler.daily("Погода вечером", s.weather_evening, lambda now: weather_evening(ctx, now))
         if s.weather_alerts_enabled:
             scheduler.every("Изменения погоды", s.weather_alerts_every_min,
                             lambda now: weather_alerts(ctx, now),
