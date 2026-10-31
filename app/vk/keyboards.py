@@ -56,12 +56,13 @@ MENU_COMMANDS = {
     "🎂 Мой день рождения": "mybd_help",
     "🌤 Погода": "weather",
     "ℹ️ Помощь": "help",
+    "👤 Связаться с менеджером": "manager",
 }
 
 
 def main_menu() -> dict:
     labels = list(MENU_COMMANDS)
-    rows = [labels[0:2], labels[2:4], labels[4:6]]
+    rows = [labels[0:2], labels[2:4], labels[4:6], labels[6:7]]
     return {"one_time": False, "buttons": [
         [text(label, {"cmd": MENU_COMMANDS[label]}, "primary" if MENU_COMMANDS[label] == "catalog" else None)
          for label in row] for row in rows]}
@@ -150,6 +151,22 @@ def name_choice(suggested: str = "") -> dict:
 
 def birthday_skip() -> dict:
     return inline([[text("Пропустить", {"cmd": "skip_bd"})]])
+
+
+def handoff_offer() -> dict:
+    """Под ответом бота, когда нужен менеджер."""
+    return inline([[callback("📞 Передать вопрос менеджеру", {"a": "hand"}, "positive")]])
+
+
+def handoff_phone(saved_phone: str = "") -> dict:
+    rows = [[text(f"📞 {saved_phone}", {"cmd": "use_phone"})]] if saved_phone else []
+    rows.append([text("💬 Без телефона — напишите мне в ВК", {"cmd": "no_phone"})])
+    rows.append([callback("❌ Не нужно", {"a": "h_cancel"}, "negative")])
+    return inline(rows)
+
+
+def handoff_cancel() -> dict:
+    return inline([[callback("❌ Не нужно", {"a": "h_cancel"}, "negative")]])
 
 
 def chat_catalog(label: str = "🛍 Каталог и заказ") -> dict:

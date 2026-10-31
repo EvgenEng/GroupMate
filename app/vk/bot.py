@@ -17,6 +17,8 @@ from html import escape
 from app import jobs
 from app.context import AppContext
 from app.core import birthdays as bd
+from app.core.faq_bot import FaqBot, Reply
+from app.core.knowledge import HANDOFF_FALLBACK, format_handoff, split_handoff
 from app.core.orders import STATUSES, catalog_intro, checkout_comment_hint, fmt_qty, format_cart, \
     format_order, format_product
 from app.services import weather_reports
@@ -42,9 +44,11 @@ PHRASES = {
     "birthdays": {"birthdays", "bd", "дни рождения", "ближайшие дни рождения"},
     "id": {"id"},
     "orders": {"orders", "заказы"},
+    "manager": {"менеджер", "связаться с менеджером", "позвать менеджера", "оператор", "живой человек"},
 }
 ARG_COMMANDS = {"mybd": "mybd", "др": "mybd", "bd_add": "bd_add", "bd_del": "bd_del"}
-CHECKOUT_BUTTONS = {"no_comment", "use_name", "use_phone", "skip_bd"}
+CHECKOUT_BUTTONS = {"no_comment", "use_name", "use_phone", "skip_bd", "no_phone"}
+HANDOFF_DAILY_CAP = 5   # сколько раз в сутки один человек может передать вопрос менеджеру
 ADMIN_COMMANDS = {"test_morning", "test_evening", "test_bd", "bd_list", "bd_sync", "bd_add", "bd_del"}
 
 WELCOMES = [
@@ -90,7 +94,9 @@ class VkBot:
         self.ctx = ctx
         self.api = api
         self.group_id = ctx.settings.vk_group_id
+        self.faq = FaqBot.load(ctx.catalog, ctx.settings.catalog_path.with_name("answers.json"))   # ответы без нейросети
         self.checkout: dict[int, dict] = {}   # оформление заказа: user_id → {"step": …, …}
+        self.handoff_q: dict[int, tuple[str, str]] = {}   # последний вопрос без ответа: user_id → (вопрос, ответ бота)
         self._users: dict[int, dict] = {}
         self._greeted: dict[int, float] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -228,7 +234,7 @@ class VkBot:
             await self.ctx.db.add_birthday(await self.full_name(user_id), parsed[0], parsed[1], PLATFORM,
                                            user_id, u.get("screen_name"))
             await self.send(user_id, f"🎂 Вижу в профиле день рождения {parsed[0]} {bd.MONTHS_RU[parsed[1] - 1]} — "
-                                     f"обязательно поздравлю в беседе! Если не нужно, напишите «др удалить».")
+                                     f"записал! Закажите у нас в этот день — " + "добавим к заказу вкусный подарок и поздравим вас 🎁" + " Если не нужно, напишите «др удалить».")
 
     async def on_action(self, peer_id: int, from_id: int, action: dict) -> None:
         kind = action.get("type")
@@ -284,6 +290,12 @@ class VkBot:
             await self.send(peer_id, f"ID этого чата (peer_id): {peer_id}\nВаш ID ВКонтакте: {user_id}")
         elif cmd == "orders":
             await self.cmd_orders(peer_id, user_id)
+        elif cmd == "manager":
+            if chat:
+                await self.send(peer_id, "С менеджером можно связаться в личных сообщениях сообщества — напишите нам туда 🙂")
+            else:
+                self.handoff_q.pop(user_id, None)   # без готового вопроса — спросим его самого
+                await self.handoff_start(user_id)
         elif cmd in ADMIN_COMMANDS:
             if await self.is_admin(user_id):
                 await self.admin_command(cmd, arg, peer_id, reply)
@@ -297,14 +309,14 @@ class VkBot:
         self._greeted[user_id] = now
         name = (await self.user(user_id)).get("first_name", "")
         shop = self.ctx.catalog.shop
-        lines = [f"Здравствуйте{', ' + escape(name) if name else ''}! 👋"]
+        lines = [f"🐻 Здравствуйте{', ' + escape(name) if name else ''}!"]
         if shop.name:
             lines.append(f"Я бот {escape(shop.name)}. {escape(shop.about)}")
         lines += ["", "🛍 Каталог и заказ — прямо здесь, кнопками",
-                  "🎂 Именинников поздравляем и готовим приятный бонус к заказу"]
-        if self.ctx.llm.enabled:
-            lines.append("💬 Можно задать вопрос — отвечу")
-        lines += ["", "Меню — на кнопках внизу 👇"]
+                  "🎂 В день рождения — вкусный подарок к заказу и поздравление от нас"]
+        lines.append("💬 Спросите про цены, оплату или сроки — отвечу, а сложное передам менеджеру")
+        lines += ["", "🐻 Меню — на кнопках внизу 👇",
+                  "Если кнопки пропали — напишите «меню» или нажмите значок с квадратиками в строке ввода."]
         await self.send(user_id, "\n".join(lines), kb.main_menu())
 
     async def cmd_help(self, peer_id: int) -> None:
@@ -332,7 +344,7 @@ class VkBot:
         u = await self.user(user_id)
         await self.ctx.db.add_birthday(await self.full_name(user_id), parsed[0], parsed[1], PLATFORM,
                                        user_id, u.get("screen_name"))
-        await self.send(peer_id, f"🎂 Записал! {parsed[0]} {bd.MONTHS_RU[parsed[1] - 1]} поздравлю вас в беседе 🎉")
+        await self.send(peer_id, f"🎂 Записал! {parsed[0]} {bd.MONTHS_RU[parsed[1] - 1]} " + f"Закажите у нас в этот день — добавим к заказу вкусный подарок и поздравим вас 🎁")
 
     async def cmd_birthdays(self, peer_id: int) -> None:
         items = await self.ctx.db.list_birthdays()
@@ -412,10 +424,15 @@ class VkBot:
     # ── нейросеть ─────────────────────────────────────────────
     async def talk(self, peer_id: int, user_id: int, text: str, chat: bool) -> None:
         ctx = self.ctx
+        reply = self.faq.answer(text)   # сначала — готовые ответы: цены из каталога, оплата, сроки, доставка
+        if reply is not None:
+            await self.send_rule_reply(peer_id, user_id, text, reply, chat)
+            return
         if not ctx.llm.enabled:
             if not chat:
-                await self.send(peer_id, "Поболтать пока не могу — нейросеть не подключена. "
-                                         "Но каталог и погода работают! 🙂", kb.main_menu())
+                self.handoff_q[user_id] = (text, "")
+                await self.send(peer_id, "Не уверен, что понял вас 🙂 Могу показать каталог или передать ваш вопрос "
+                                         "менеджеру — он свяжется с вами.", kb.handoff_offer())
             return
         if not await ctx.llm_allowed(PLATFORM, user_id, await self.is_admin(user_id)):
             await self.send(peer_id, random.choice(LIMIT_TEXTS))
@@ -430,10 +447,82 @@ class VkBot:
                                         extra_context=f"Сегодня {ctx.today().strftime('%d.%m.%Y')}.")
         except LLMError as exc:
             logger.warning("ВК LLM: %s", exc)
-            await self.send(peer_id, "🤖 Что-то я задумался и не смог ответить. Попробуйте ещё раз чуть позже.")
+            if chat:
+                await self.send(peer_id, "🤖 Что-то я задумался и не смог ответить. Попробуйте ещё раз чуть позже.")
+            else:
+                self.handoff_q[user_id] = (text, "")
+                await self.send(peer_id, "🤖 Не получилось ответить сразу. Могу передать ваш вопрос менеджеру — "
+                                         "он свяжется с вами.", kb.handoff_offer())
             return
+        answer, needs_manager = split_handoff(answer)
+        if needs_manager and not answer:
+            answer = HANDOFF_FALLBACK
         prefix = f"{self.mention(user_id, name)}, " if chat and name else ""
-        await self.send(peer_id, prefix + escape(answer))
+        if not needs_manager:
+            await self.send(peer_id, prefix + escape(answer))
+        elif chat:
+            await self.send(peer_id, prefix + escape(answer) + "\n\nОставить контакты для связи с менеджером "
+                                                              "можно в личных сообщениях сообщества.")
+        else:
+            self.handoff_q[user_id] = (text, answer)
+            await self.send(peer_id, escape(answer) + "\n\nОставьте контакты — менеджер свяжется с вами 👇",
+                            kb.handoff_offer())
+
+    async def send_rule_reply(self, peer_id: int, user_id: int, text: str, reply: Reply, chat: bool) -> None:
+        if reply.silent:
+            return
+        if not reply.text:   # приветствие: просто показываем меню
+            if not chat and reply.action == "start":
+                await self.cmd_start(user_id, force=True)
+            return
+        body = escape(reply.text)
+        if chat:
+            name = (await self.user(user_id)).get("first_name", "")
+            prefix = f"{self.mention(user_id, name)}, " if name else ""
+            if reply.manager:
+                body += "\n\nОставить контакты для связи с менеджером можно в личных сообщениях сообщества."
+            await self.send(peer_id, prefix + body)
+            return
+        if reply.manager:
+            self.handoff_q[user_id] = (text, reply.text)
+            await self.send(peer_id, body + "\n\nОставьте контакты — менеджер свяжется с вами 👇", kb.handoff_offer())
+        else:
+            await self.send(peer_id, body, kb.main_menu())   # меню под ответом возвращает кнопки, если они свернулись
+        if reply.action == "catalog":
+            await self.dispatch("catalog", "", peer_id, user_id, chat, {})
+
+    # ── передача вопроса менеджеру ────────────────────────────
+    async def handoff_start(self, user_id: int) -> None:
+        saved_phone = (await self.contact(user_id)).get("phone", "")
+        known = self.handoff_q.get(user_id)
+        if not known:
+            self.checkout[user_id] = {"step": "h_question", "saved_phone": saved_phone}
+            await self.send(user_id, "Напишите ваш вопрос одним сообщением ✍️ Я передам его менеджеру.", kb.handoff_cancel())
+            return
+        question, answer = known
+        state = {"step": "h_phone", "question": question, "answer": answer, "saved_phone": saved_phone}
+        self.checkout[user_id] = state
+        await self.ask_handoff_phone(user_id, state)
+
+    async def ask_handoff_phone(self, user_id: int, state: dict) -> None:
+        await self.send(user_id, "📞 Напишите телефон — менеджер позвонит или напишет вам. Например: +7 999 123-45-67\n"
+                                 "Если телефон не хотите оставлять, выберите «без телефона» — менеджер напишет вам в ВК.",
+                        kb.handoff_phone(state.get("saved_phone", "")))
+
+    async def finish_handoff(self, user_id: int, question: str, answer: str, phone: str) -> None:
+        self.checkout.pop(user_id, None)
+        self.handoff_q.pop(user_id, None)
+        if not await self.ctx.db.usage_hit(self.ctx.today().isoformat(), "vk_handoff", user_id, HANDOFF_DAILY_CAP):
+            await self.send(user_id, "Сегодня вы уже передали несколько вопросов — менеджер скоро свяжется с вами 🙂",
+                            kb.main_menu())
+            return
+        name = (await self.contact(user_id)).get("name") or await self.full_name(user_id)
+        html = format_handoff(name, f"https://vk.ru/id{user_id}", phone, question, answer)
+        if await self.ctx.messenger.notify_handoff(html):
+            await self.send(user_id, "✅ Передал ваш вопрос менеджеру. Он свяжется с вами, как только сможет.", kb.main_menu())
+        else:
+            await self.send(user_id, "Не получилось сразу передать вопрос менеджеру 😔 Пожалуйста, напишите чуть позже.",
+                            kb.main_menu())
 
     # ── магазин ───────────────────────────────────────────────
     async def send_catalog_photo(self, peer_id: int) -> bool:
@@ -547,6 +636,12 @@ class VkBot:
         elif action == "co_cancel":
             self.checkout.pop(user_id, None)
             await self.send(user_id, "Оформление отменено. Корзина сохранена 🛒", kb.main_menu())
+        elif action == "hand":
+            await self.handoff_start(user_id)
+        elif action == "h_cancel":
+            self.checkout.pop(user_id, None)
+            self.handoff_q.pop(user_id, None)
+            await self.send(user_id, "Хорошо, не передаю. Если что — я на связи 🙂", kb.main_menu())
         try:
             await self.api.answer_event(event_id, user_id, peer_id, snackbar, link=link)
         except VkApiError as exc:
@@ -571,11 +666,33 @@ class VkBot:
         state = self.checkout[user_id]
         cmd = (payload or {}).get("cmd")
         text = text.strip()
+        step = state["step"]
         if text.lower() in {"отмена", "отменить", "/cancel"}:
             self.checkout.pop(user_id, None)
-            await self.send(user_id, "Оформление отменено. Корзина сохранена 🛒", kb.main_menu())
+            if step.startswith("h_"):
+                self.handoff_q.pop(user_id, None)
+                await self.send(user_id, "Хорошо, не передаю. Если что — я на связи 🙂", kb.main_menu())
+            else:
+                await self.send(user_id, "Оформление отменено. Корзина сохранена 🛒", kb.main_menu())
             return
-        step = state["step"]
+        if step == "h_question":
+            if len(text) < 3:
+                await self.send(user_id, "Напишите, пожалуйста, ваш вопрос одним сообщением ✍️", kb.handoff_cancel())
+                return
+            state.update(step="h_phone", question=text[:1000], answer="")
+            await self.ask_handoff_phone(user_id, state)
+            return
+        if step == "h_phone":
+            if cmd == "no_phone":
+                phone = ""
+            else:
+                phone = state.get("saved_phone", "") if cmd == "use_phone" else text
+                if not phone or not PHONE_RE.match(phone):
+                    await self.send(user_id, "Не похоже на номер 🤔 Напишите, например: +7 999 123-45-67 — "
+                                             "или выберите вариант «без телефона».", kb.handoff_phone(state.get("saved_phone", "")))
+                    return
+            await self.finish_handoff(user_id, state["question"], state.get("answer", ""), phone)
+            return
         if step == "name":
             name = state.get("suggested", "") if cmd == "use_name" else " ".join(text.split())
             if len(name.split()) < 2 or len(name) > 80 or any(ch.isdigit() for ch in name):
@@ -623,8 +740,11 @@ class VkBot:
             await self.send(user_id, "Корзина пуста 🤷", kb.main_menu())
             return
         await self.ctx.db.kv_set(f"contact:vk:{user_id}", {"name": state["name"], "phone": state["phone"]})
+        mine = await self.ctx.db.birthday_of(PLATFORM, user_id)
+        gift = ("\n\n🎂 С днём рождения! Добавим к вашему заказу вкусный подарок 🎁"
+                if mine and bd.order_on_birthday(mine, order.created_at) else "")
         await self.send(user_id, f"🎉 Заказ №{order.id} оформлен! Мы скоро свяжемся с вами.\n\n"
-                        + format_order(order, self.ctx.catalog.currency), kb.main_menu())
+                        + format_order(order, self.ctx.catalog.currency) + gift, kb.main_menu())
         await self.ctx.messenger.notify_new_order(order)
         await self.offer_birthday(user_id, state["name"])
 
@@ -654,7 +774,7 @@ class VkBot:
         self.checkout.pop(user_id, None)
         await self.ctx.db.add_birthday(state["name"], parsed[0], parsed[1], PLATFORM, user_id)
         await self.send(user_id, f"🎂 Записал: {parsed[0]} {bd.MONTHS_RU[parsed[1] - 1]}. "
-                                 "Будем ждать вас с поздравлениями! 🎁", kb.main_menu())
+                                 "Закажите у нас в этот день — добавим к заказу вкусный подарок и поздравим вас 🎁", kb.main_menu())
 
     async def change_status(self, user_id: int, peer_id: int, cmid: int | None, payload: dict) -> str:
         if not await self.is_manager(user_id):

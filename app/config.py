@@ -118,6 +118,7 @@ class Settings:
     catalog_path: Path
     holidays_path: Path
     catalog_image: Path | None = None   # картинка-прайс, которую бот показывает при «Каталог»
+    faq_path: Path | None = None        # справка для нейросети: доставка, оплата, сроки
 
     llm_providers: list[LLMProvider] = field(default_factory=list)
     llm_daily_cap: int = 30
@@ -218,6 +219,7 @@ def load_settings() -> Settings:
         catalog_path=_path("CATALOG_PATH", "config/catalog.json"),
         holidays_path=_path("HOLIDAYS_PATH", "config/holidays.json"),
         catalog_image=_path("CATALOG_IMAGE", "config/catalog.jpg") if _str("CATALOG_IMAGE", "x") else None,
+        faq_path=_path("FAQ_PATH", "config/faq.txt"),
         llm_providers=_providers(),
         llm_daily_cap=_int("LLM_DAILY_CAP", 30),
         llm_system_prompt=prompt,

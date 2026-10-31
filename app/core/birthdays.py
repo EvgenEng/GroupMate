@@ -35,6 +35,12 @@ class Birthday:
         return f"{self.day} {MONTHS_RU[self.month - 1]}"
 
 
+def order_on_birthday(b: Birthday, created_at: str) -> bool:
+    """Заказ сделан в день рождения покупателя? created_at — «31.10.2026 15:20»."""
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.", created_at or "")
+    return bool(m) and (int(m.group(1)), int(m.group(2))) == (b.day, b.month)
+
+
 _DATE_RE = re.compile(r"^(\d{1,2})[.\-/](\d{1,2})$")
 
 
@@ -90,8 +96,8 @@ def days_word(n: int) -> str:
     return f"через {n} {word}"
 
 
-DEFAULT_BIRTHDAY_OFFER = ("🎁 Подскажите дату вашего дня рождения — в этот день поздравим вас "
-                          "и приготовим приятный бонус к заказу!\n\nНапишите день и месяц, например: 15.04")
+DEFAULT_BIRTHDAY_OFFER = ("🎁 Подскажите дату вашего дня рождения — если закажете у нас в этот день, "
+                          "добавим к заказу вкусный подарок и поздравим вас!\n\nНапишите день и месяц, например: 15.04")
 
 FALLBACK_GREETINGS = [
     "🎉 Сегодня день рождения у {names}!\n\nПусть этот год будет щедрым на радость, тёплых людей "

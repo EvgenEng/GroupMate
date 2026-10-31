@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from app.config import Settings
+from app.core.birthdays import order_on_birthday
 from app.core.orders import Catalog, OrderView, STATUS_FOR_CUSTOMER, format_manager_order
 from app.services.db import Database
 from app.vk import keyboards as vk_kb
@@ -128,7 +129,8 @@ class Messenger:
     async def manager_text(self, order: OrderView) -> str:
         """Текст заказа для менеджера (с днём рождения покупателя, если он известен)."""
         bd = await self.db.birthday_of(order.platform, order.user_id)
-        return format_manager_order(order, self.catalog.currency, bd.date_text() if bd else None)
+        today = bool(bd) and order_on_birthday(bd, order.created_at)   # заказ сделан в день рождения → пометка «подарок»
+        return format_manager_order(order, self.catalog.currency, bd.date_text() if bd else None, today)
 
     async def notify_new_order(self, order: OrderView) -> int:
         """Шлёт заказ всем менеджерам с кнопками статусов. Возвращает, скольким дошло."""
@@ -148,6 +150,17 @@ class Messenger:
         note = STATUS_FOR_CUSTOMER.get(order.status)
         if note:
             await self.to_user(order.platform, order.user_id, note.format(id=order.id))
+
+    async def notify_handoff(self, html: str) -> int:
+        """Вопрос покупателя, на который бот не смог ответить: всем менеджерам. Возвращает, скольким дошло."""
+        delivered = 0
+        for uid in await self.tg_manager_ids():
+            delivered += await self._tg_send(uid, html)
+        for uid in await self.vk_manager_ids():
+            delivered += await self._vk_send(uid, html)
+        if not delivered:
+            logger.error("Вопрос покупателя некому передать: ни один менеджер не получил сообщение!")
+        return delivered
 
     async def notify_market_order(self, html: str) -> None:
         """Заказ, оформленный через раздел «Товары» ВКонтакте."""

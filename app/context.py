@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import Settings
 from app.core.holidays import Holiday
+from app.core.knowledge import build_knowledge, load_faq
 from app.core.orders import Catalog
 from app.messenger import Messenger
 from app.services.db import Database
@@ -59,10 +60,12 @@ def build_context(settings: Settings) -> AppContext:
 
     db = Database(settings.db_path)
     catalog = Catalog.load(settings.catalog_path)
+    llm = LLMClient(settings.llm_providers, settings.llm_system_prompt)
+    llm.knowledge = build_knowledge(catalog, load_faq(settings.faq_path or settings.catalog_path.with_name("faq.txt")))
     return AppContext(
         settings=settings,
         db=db,
-        llm=LLMClient(settings.llm_providers, settings.llm_system_prompt),
+        llm=llm,
         weather=WeatherService(settings.weather_locations, settings.timezone),
         catalog=catalog,
         holidays=load_holidays(settings.holidays_path),

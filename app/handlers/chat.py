@@ -13,6 +13,7 @@ from aiogram.enums import ChatAction
 from aiogram.types import Message
 
 from app.context import AppContext
+from app.core.knowledge import HANDOFF_FALLBACK, format_handoff, split_handoff
 from app.services.llm import LLMError
 
 logger = logging.getLogger(__name__)
@@ -61,4 +62,14 @@ async def talk(message: Message, ctx: AppContext, bot: Bot) -> None:
         logger.warning("LLM не ответила: %s", exc)
         await message.reply("🤖 Что-то я задумался и не смог ответить. Попробуйте ещё раз чуть позже.")
         return
+    answer, needs_manager = split_handoff(answer)
+    if needs_manager and not answer:
+        answer = HANDOFF_FALLBACK
     await message.reply(escape(answer)[:4000])
+    if needs_manager and message.chat.type == "private":
+        user = message.from_user
+        name = user.full_name + (f" (@{user.username})" if user.username else "")
+        html = format_handoff(name, f"tg://user?id={user.id}", "", question, answer,
+                              no_phone_hint="написать в Telegram по ссылке выше")
+        if await ctx.messenger.notify_handoff(html):
+            await message.answer("✅ Передал ваш вопрос менеджеру — он напишет вам здесь.")

@@ -42,6 +42,7 @@ class LLMClient:
         self.providers = providers
         self.system_prompt = system_prompt
         self.timeout = timeout
+        self.knowledge = ""   # справка о магазине: каталог, FAQ, правила ответов (подмешивается только в диалог)
         # Короткая память диалога: последние 3 пары «вопрос–ответ» на чат.
         self._history: dict[str, deque] = defaultdict(lambda: deque(maxlen=6))
 
@@ -71,8 +72,10 @@ class LLMClient:
                     last_error = exc
         raise LLMError(str(last_error))
 
-    def _system(self, extra: str = "") -> list[dict]:
+    def _system(self, extra: str = "", knowledge: bool = False) -> list[dict]:
         prompt = self.system_prompt or DEFAULT_SYSTEM_PROMPT
+        if knowledge and self.knowledge:
+            prompt = f"{prompt}\n\n{self.knowledge}"
         if extra:
             prompt = f"{prompt}\n\n{extra}"
         return [{"role": "system", "content": prompt}]
@@ -80,7 +83,7 @@ class LLMClient:
     async def chat(self, chat_key: str, user_text: str, extra_context: str = "") -> str:
         """chat_key — «tg:123» или «vk:2000000001»: у каждого чата своя короткая память."""
         history = self._history[chat_key]
-        messages = self._system(extra_context) + list(history) + [{"role": "user", "content": user_text}]
+        messages = self._system(extra_context, knowledge=True) + list(history) + [{"role": "user", "content": user_text}]
         answer = await self.complete(messages)
         history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": answer})

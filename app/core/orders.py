@@ -230,9 +230,13 @@ def format_order(o: OrderView, currency: str, for_owner: bool = False) -> str:
     return "\n".join(rows)
 
 
-def format_manager_order(o: OrderView, currency: str, birthday: str | None = None) -> str:
+def format_manager_order(o: OrderView, currency: str, birthday: str | None = None,
+                         birthday_today: bool = False) -> str:
     """Заказ для менеджера: позиции и количество, ФИО, телефон."""
-    rows = [f"🔔 <b>Заказ №{o.id}</b> — {STATUSES.get(o.status, o.status)}", ""]
+    rows = [f"🔔 <b>Заказ №{o.id}</b> — {STATUSES.get(o.status, o.status)}"]
+    if birthday_today:
+        rows.append("🎁 <b>Именинник!</b> Заказ в день рождения — положите вкусный подарок и поздравьте 🎉")
+    rows.append("")
     for name, qty, _price, unit in o.items:
         rows.append(f"• {escape(name)} — {fmt_qty(qty)} {escape(unit)}")
     approx = has_weight_items(unit for *_, unit in o.items)

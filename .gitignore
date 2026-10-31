@@ -1,6 +1,5 @@
 .env
 data/
-config/prompt.txt
 __pycache__/
 *.pyc
 .venv/
