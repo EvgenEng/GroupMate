@@ -423,7 +423,7 @@ class VkHandoffTests(VkTestCase):
 
     def test_llm_disabled_offers_handoff_in_dm_and_silent_in_chat(self):
         self.run_all(message(CUSTOMER, CUSTOMER, "Расскажите про вашу компанию"))
-        self.assertEqual(self.api.sent[-1][2]["buttons"][0][0]["action"]["label"], "📞 Передать вопрос менеджеру")
+        self.assertEqual(self.api.sent[-1][2]["buttons"][0][0]["action"]["label"], "📞 Передать менеджеру")
         before = len(self.api.sent)
         self.run_all(message(CHAT, CUSTOMER, "[club239343586|@gastrodomru] привет"))
         self.assertEqual(len(self.api.sent), before)

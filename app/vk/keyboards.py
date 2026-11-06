@@ -155,7 +155,7 @@ def birthday_skip() -> dict:
 
 def handoff_offer() -> dict:
     """Под ответом бота, когда нужен менеджер."""
-    return inline([[callback("📞 Передать вопрос менеджеру", {"a": "hand"}, "positive")]])
+    return inline([[callback("📞 Передать менеджеру", {"a": "hand"}, "positive")]])
 
 
 def handoff_phone(saved_phone: str = "") -> dict:
