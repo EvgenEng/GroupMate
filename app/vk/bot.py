@@ -63,6 +63,32 @@ LIMIT_TEXTS = [
 ]
 
 
+# Приветствие нового подписчика сообщества. Отдельно от приветствия в беседе (WELCOMES)
+# и от ответа на «Начать» (cmd_start): уходит один раз за всё время.
+SUBSCRIBER_WELCOME = (
+    "Приветствуем тебя в GASTRODOM! ❤️\n\n"
+    "Мы очень рады знакомству и тому, что ты заглянул(а) к нам!\n\n"
+    "Нас объединяет любовь к натуральным продуктам, настоящему вкусу и заботе о здоровье. 🌿\n\n"
+    "Для нас здоровое питание — это не строгие ограничения, а удовольствие от качественных продуктов, "
+    "осознанный выбор и забота о себе и близких.\n\n"
+    "Мы создаём GASTRODOM с душой и хотим, чтобы на твоём столе всегда было что-то "
+    "по-настоящему вкусное и натуральное! ❤️\n\n"
+    "А если захочется узнать о наших продуктах побольше, уточнить детали или оформить заказ — "
+    "просто напиши нашему мишке! 🐻\n\n"
+    "Он с удовольствием поможет, ответит на вопросы и подскажет, что делать дальше.\n\n"
+    "Спасибо, что ты с нами!\n"
+    "Твой GASTRODOM ❤️"
+)
+# group_join приходит и для заявки в закрытое сообщество («request»), и для «возможно пойду» («unsure»):
+# эти люди ещё не подписчики.
+WELCOME_JOIN_TYPES = {None, "", "join", "approved", "accepted"}
+
+
+def welcome_key(user_id: int) -> str:
+    """Ключ в таблице kv: {"state": "pending" | "sent"}. Переживает перезапуск бота."""
+    return f"welcome:vk:{user_id}"
+
+
 def resolve_command(text: str, payload: dict | None) -> tuple[str | None, str]:
     """Текст или кнопка → (команда, аргумент)."""
     if payload:
@@ -100,6 +126,7 @@ class VkBot:
         self._users: dict[int, dict] = {}
         self._greeted: dict[int, float] = {}
         self._tasks: set[asyncio.Task] = set()
+        self._welcome_lock = asyncio.Lock()   # событие подписки и «разрешил сообщения» бывают рядом
 
     # ── запуск ────────────────────────────────────────────────
     async def start(self) -> None:
@@ -124,8 +151,11 @@ class VkBot:
                 await self.on_message(obj.get("message", obj))
             elif kind == "message_event":
                 await self.on_event(obj)
+            elif kind == "group_join":
+                await self.on_group_join(obj)
             elif kind == "message_allow":
-                await self.cmd_start(obj["user_id"])
+                if not await self.send_pending_welcome(obj["user_id"]):
+                    await self.cmd_start(obj["user_id"])
             elif kind == "market_order_new":
                 await self.on_market_order(obj)
         except Exception:  # noqa: BLE001 — одно сломанное событие не должно ронять бота
@@ -203,6 +233,8 @@ class VkBot:
 
         if not chat:
             await self.on_first_contact(from_id)
+            if await self.send_pending_welcome(from_id) and self._only_greeting(text, payload):
+                return  # подписчик только поздоровался или нажал «Начать» — приветствие он уже получил
             state = self.checkout.get(from_id)
             menu_press = bool(payload) and (payload.get("command") == "start"
                                             or payload.get("cmd") not in (None, *CHECKOUT_BUTTONS))
@@ -258,6 +290,62 @@ class VkBot:
                 + f"\n\nЯ бот {escape(shop)}: принимаю заказы на наши деликатесы и поздравляю "
                   "с днём рождения 🎂 Каталог — по кнопке ниже.")
         await self.send(peer_id, text, kb.chat_catalog())
+
+    # ── приветствие нового подписчика ─────────────────────────
+    async def can_write(self, user_id: int) -> bool:
+        """Разрешил ли человек сообщения от сообщества (без этого ВК не даёт написать первыми)."""
+        try:
+            res = await self.api.call("messages.isMessagesFromGroupAllowed",
+                                      group_id=self.group_id, user_id=user_id)
+        except VkApiError as exc:
+            logger.debug("ВК: isMessagesFromGroupAllowed: %s", exc)
+            return False
+        return bool((res or {}).get("is_allowed"))
+
+    async def on_group_join(self, obj: dict) -> None:
+        """Новый подписчик: пишем сразу, если разрешены сообщения, иначе ждём разрешения."""
+        user_id = obj.get("user_id", 0)
+        if user_id <= 0 or not self.ctx.settings.welcome_enabled:
+            return
+        if obj.get("join_type") not in WELCOME_JOIN_TYPES:
+            return
+        async with self._welcome_lock:
+            state = await self.ctx.db.kv_get(welcome_key(user_id), {}) or {}
+            if state.get("state") == "sent":
+                return  # повторное событие или человек вернулся — второго приветствия не будет
+            if await self.can_write(user_id) and await self._deliver_welcome(user_id):
+                return
+            await self.ctx.db.kv_set(welcome_key(user_id), {"state": "pending"})
+            logger.info("ВК: подписчик %s пока не разрешил сообщения — приветствие ждёт", user_id)
+
+    async def send_pending_welcome(self, user_id: int) -> bool:
+        """Отправляет отложенное приветствие тому, кто подписался раньше, когда написать ему было нельзя.
+        True — приветствие только что ушло."""
+        if not self.ctx.settings.welcome_enabled:
+            return False
+        async with self._welcome_lock:
+            state = await self.ctx.db.kv_get(welcome_key(user_id), {}) or {}
+            return state.get("state") == "pending" and await self._deliver_welcome(user_id)
+
+    async def _deliver_welcome(self, user_id: int) -> bool:
+        """Шлёт приветствие и запоминает это в базе. False — не получилось, останется в ожидании."""
+        try:
+            await self.api.send(user_id, html_to_vk(SUBSCRIBER_WELCOME), keyboard=kb.main_menu())
+        except VkApiError as exc:
+            logger.warning("ВК: приветствие подписчику %s не отправлено: %s", user_id, exc)
+            return False
+        await self.ctx.db.kv_set(welcome_key(user_id), {"state": "sent"})
+        self._greeted[user_id] = asyncio.get_running_loop().time()   # «Начать» следом не повторит приветствие
+        logger.info("ВК: приветствие новому подписчику %s отправлено", user_id)
+        return True
+
+    def _only_greeting(self, text: str, payload: dict | None) -> bool:
+        """«Начать», «меню» или просто «Здравствуйте» — прежнее приветствие поверх нового не нужно."""
+        cmd, _ = resolve_command(text, payload)
+        if cmd == "start":
+            return True
+        reply = self.faq.answer(text) if text.strip() else None
+        return reply is not None and reply.action == "start" and not reply.text
 
     # ── команды ───────────────────────────────────────────────
     async def dispatch(self, cmd: str, arg: str, peer_id: int, user_id: int, chat: bool, reply: dict) -> None:

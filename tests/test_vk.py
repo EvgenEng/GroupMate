@@ -588,3 +588,105 @@ class VkBirthdayOrderTests(VkTestCase):
         self.order()
         self.assertFalse(any("Именинник" in t for t in self.api.texts_to(MANAGER)))
         self.assertFalse(any("С днём рождения" in t for t in self.api.texts_to(CUSTOMER)))
+
+
+class VkSubscriberWelcomeTests(VkTestCase):
+    """Приветствие нового подписчика сообщества: один раз и только когда можно написать."""
+
+    WELCOME = "Приветствуем тебя в GASTRODOM"
+    OLD_GREETING = "🐻 Здравствуйте"
+
+    def join(self, user_id, **extra):
+        return {"type": "group_join", "object": {"user_id": user_id, "join_type": "join", **extra}}
+
+    def allow(self, user_id):
+        return {"type": "message_allow", "object": {"user_id": user_id}}
+
+    def welcomes(self, user_id):
+        return [t for t in self.api.texts_to(user_id) if t.startswith(self.WELCOME)]
+
+    def old_greetings(self, user_id):
+        return [t for t in self.api.texts_to(user_id) if t.startswith(self.OLD_GREETING)]
+
+    def state(self, user_id):
+        return asyncio.run(self.ctx.db.kv_get(f"welcome:vk:{user_id}", {})).get("state")
+
+    def test_subscriber_with_permission_gets_welcome_with_menu_once(self):
+        self.run_all(self.join(CUSTOMER), self.join(CUSTOMER))   # повторное событие — второго приветствия нет
+        self.assertEqual(len(self.welcomes(CUSTOMER)), 1)
+        self.assertIn("напиши нашему мишке", self.welcomes(CUSTOMER)[0])
+        self.assertTrue(self.welcomes(CUSTOMER)[0].endswith("Твой GASTRODOM ❤️"))
+        keyboard = [k for p, t, k in self.api.sent if p == CUSTOMER and t.startswith(self.WELCOME)][0]
+        self.assertFalse(keyboard.get("inline", False))           # главное меню под приветствием
+        self.assertEqual(self.state(CUSTOMER), "sent")
+        self.assertEqual(self.api.texts_to(CHAT), [])             # беседа не затронута
+
+    def test_subscriber_without_permission_waits(self):
+        self.run_all(self.join(STRANGER))
+        self.assertEqual(self.api.texts_to(STRANGER), [])
+        self.assertEqual(self.state(STRANGER), "pending")
+
+    def test_pending_welcome_after_allow_and_start_adds_no_duplicate(self):
+        self.run_all(self.join(STRANGER))
+        self.api.allowed.add(STRANGER)
+        self.run_all(self.allow(STRANGER), message(STRANGER, STRANGER, "Начать", {"command": "start"}))
+        self.assertEqual(len(self.welcomes(STRANGER)), 1)
+        self.assertEqual(self.old_greetings(STRANGER), [])        # прежнее приветствие поверх не приходит
+        self.assertEqual(self.state(STRANGER), "sent")
+
+    def test_pending_subscriber_pressing_start_gets_only_welcome(self):
+        self.run_all(self.join(STRANGER), message(STRANGER, STRANGER, "Начать", {"command": "start"}))
+        self.assertEqual(len(self.welcomes(STRANGER)), 1)
+        self.assertEqual(self.old_greetings(STRANGER), [])
+
+    def test_pending_subscriber_saying_hello_gets_only_welcome(self):
+        self.run_all(self.join(STRANGER), message(STRANGER, STRANGER, "Здравствуйте!"))
+        self.assertEqual(len(self.welcomes(STRANGER)), 1)
+        self.assertEqual(self.old_greetings(STRANGER), [])
+
+    def test_pending_subscriber_asking_question_gets_welcome_then_answer(self):
+        self.run_all(self.join(STRANGER), message(STRANGER, STRANGER, "Сколько стоит шейка?"))
+        texts = self.api.texts_to(STRANGER)
+        self.assertEqual(len(self.welcomes(STRANGER)), 1)
+        first_welcome = next(i for i, t in enumerate(texts) if t.startswith(self.WELCOME))
+        first_price = next(i for i, t in enumerate(texts) if "Шейка классическая" in t)
+        self.assertLess(first_welcome, first_price)
+
+    def test_user_who_never_joined_gets_old_greeting_only(self):
+        self.run_all(self.allow(CUSTOMER), message(CUSTOMER, CUSTOMER, "Начать", {"command": "start"}))
+        self.assertEqual(self.welcomes(CUSTOMER), [])
+        self.assertEqual(len(self.old_greetings(CUSTOMER)), 1)   # как и раньше: «разрешил» + «Начать» → одно
+        self.assertIsNone(self.state(CUSTOMER))
+
+    def test_welcome_survives_restart(self):
+        self.run_all(self.join(CUSTOMER))
+        restarted = VkBot(self.ctx, self.api)                     # «перезапуск»: новый бот, та же база
+        asyncio.run(restarted.start())
+        asyncio.run(restarted.handle(self.join(CUSTOMER)))
+        self.assertEqual(len(self.welcomes(CUSTOMER)), 1)
+
+    def test_failed_send_keeps_welcome_pending(self):
+        from app.vk.api import VkApiError
+        real_send = self.api.send
+
+        async def broken(*args, **kwargs):
+            raise VkApiError(901, "Can't send messages for users without permission")
+
+        self.api.send = broken
+        self.run_all(self.join(CUSTOMER))
+        self.assertEqual(self.state(CUSTOMER), "pending")
+        self.api.send = real_send
+        self.run_all(self.allow(CUSTOMER))
+        self.assertEqual(len(self.welcomes(CUSTOMER)), 1)
+        self.assertEqual(self.state(CUSTOMER), "sent")
+
+    def test_join_request_is_not_a_subscriber_yet(self):
+        self.run_all(self.join(CUSTOMER, join_type="request"))
+        self.assertEqual(self.api.texts_to(CUSTOMER), [])
+        self.assertIsNone(self.state(CUSTOMER))
+
+    def test_welcome_can_be_switched_off(self):
+        self.ctx.settings.__dict__["welcome_enabled"] = False
+        self.run_all(self.join(CUSTOMER))
+        self.assertEqual(self.api.texts_to(CUSTOMER), [])
+        self.assertIsNone(self.state(CUSTOMER))
