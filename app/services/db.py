@@ -10,6 +10,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS cart (
     user_id INTEGER NOT NULL,
     product_id TEXT NOT NULL,
     qty REAL NOT NULL,
+    updated_at REAL,
     PRIMARY KEY (platform, user_id, product_id)
 );
 CREATE TABLE IF NOT EXISTS orders (
@@ -57,7 +59,16 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT NOT NULL DEFAULT 'new',
     created_at TEXT NOT NULL,
     final_json TEXT,
-    final_total REAL
+    final_total REAL,
+    done_at REAL
+);
+CREATE TABLE IF NOT EXISTS reviews (
+    order_id INTEGER PRIMARY KEY,
+    platform TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    rating INTEGER NOT NULL,
+    comment TEXT,
+    created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS usage (
     day TEXT NOT NULL,
@@ -113,6 +124,11 @@ class Database:
         if existing and "final_json" not in existing:   # взвешивание заказов: фактические позиции и итог
             self._conn.execute("ALTER TABLE orders ADD COLUMN final_json TEXT")
             self._conn.execute("ALTER TABLE orders ADD COLUMN final_total REAL")
+        if existing and "done_at" not in existing:      # когда заказ выдан — для просьбы об отзыве
+            self._conn.execute("ALTER TABLE orders ADD COLUMN done_at REAL")
+        cart_cols = self._columns("cart")
+        if cart_cols and "updated_at" not in cart_cols:  # когда корзину трогали в последний раз — для напоминаний
+            self._conn.execute("ALTER TABLE cart ADD COLUMN updated_at REAL")
         self._conn.commit()
 
     # ── низкоуровневое ─────────────────────────────────────
@@ -141,6 +157,11 @@ class Database:
         await self._a("INSERT INTO kv(key, value) VALUES(?, ?) "
                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                       (key, json.dumps(value, ensure_ascii=False)))
+
+    async def kv_prefix(self, prefix: str) -> dict[str, object]:
+        """Все записи kv, ключ которых начинается с prefix."""
+        rows = await self._a("SELECT key, value FROM kv WHERE substr(key, 1, ?) = ?", (len(prefix), prefix), "all")
+        return {r["key"]: json.loads(r["value"]) for r in rows}
 
     # ── пользователи ───────────────────────────────────────
     async def touch_user(self, platform: str, user_id: int, first_name: str, username: str | None) -> bool:
@@ -211,10 +232,18 @@ class Database:
             await self._a("DELETE FROM cart WHERE platform=? AND user_id=? AND product_id=?",
                           (platform, user_id, product_id))
             return 0.0
-        await self._a("INSERT INTO cart(platform, user_id, product_id, qty) VALUES(?,?,?,?) "
-                      "ON CONFLICT(platform, user_id, product_id) DO UPDATE SET qty=excluded.qty",
-                      (platform, user_id, product_id, new_qty))
+        await self._a("INSERT INTO cart(platform, user_id, product_id, qty, updated_at) VALUES(?,?,?,?,?) "
+                      "ON CONFLICT(platform, user_id, product_id) DO UPDATE SET qty=excluded.qty, "
+                      "updated_at=excluded.updated_at",
+                      (platform, user_id, product_id, new_qty, time.time()))
         return new_qty
+
+    async def stale_carts(self, platform: str, older_than: float, newer_than: float) -> list[tuple[int, float]]:
+        """Брошенные корзины: [(user_id, когда трогали в последний раз)] — не позже older_than и не раньше newer_than."""
+        rows = await self._a("SELECT user_id, MAX(updated_at) AS ts FROM cart WHERE platform=? AND updated_at IS NOT NULL "
+                             "GROUP BY user_id HAVING ts<=? AND ts>=? ORDER BY ts",
+                             (platform, older_than, newer_than), "all")
+        return [(r["user_id"], float(r["ts"])) for r in rows]
 
     async def cart_clear(self, platform: str, user_id: int) -> None:
         await self._a("DELETE FROM cart WHERE platform=? AND user_id=?", (platform, user_id))
@@ -254,7 +283,38 @@ class Database:
         return [self._order(r) for r in rows]
 
     async def set_order_status(self, order_id: int, status: str) -> None:
-        await self._a("UPDATE orders SET status=? WHERE id=?", (status, order_id))
+        await self._a("UPDATE orders SET status=?, done_at=CASE WHEN ?='done' THEN ? ELSE done_at END WHERE id=?",
+                      (status, status, time.time(), order_id))
+
+    async def all_orders(self) -> list[OrderView]:
+        rows = await self._a("SELECT * FROM orders ORDER BY id", (), "all")
+        return [self._order(r) for r in rows]
+
+    async def orders_to_review(self, platform: str, done_before: float, done_after: float) -> list[OrderView]:
+        """Выданные заказы, по которым пора просить отзыв: выданы не позже done_before и не раньше done_after."""
+        rows = await self._a("SELECT * FROM orders WHERE platform=? AND status='done' AND done_at IS NOT NULL "
+                             "AND done_at<=? AND done_at>=? ORDER BY id", (platform, done_before, done_after), "all")
+        return [self._order(r) for r in rows]
+
+    # ── оценки заказов ─────────────────────────────────────
+    async def add_review(self, order_id: int, platform: str, user_id: int, rating: int) -> bool:
+        """False — этот заказ уже оценён."""
+        if await self.review(order_id):
+            return False
+        await self._a("INSERT INTO reviews(order_id, platform, user_id, rating, created_at) VALUES(?,?,?,?,?)",
+                      (order_id, platform, user_id, rating, time.time()))
+        return True
+
+    async def set_review_comment(self, order_id: int, comment: str) -> None:
+        await self._a("UPDATE reviews SET comment=? WHERE order_id=?", (comment, order_id))
+
+    async def review(self, order_id: int) -> dict | None:
+        row = await self._a("SELECT * FROM reviews WHERE order_id=?", (order_id,), "one")
+        return dict(row) if row else None
+
+    async def ratings_since(self, since: float) -> list[int]:
+        rows = await self._a("SELECT rating FROM reviews WHERE created_at>=?", (since,), "all")
+        return [r["rating"] for r in rows]
 
     async def set_order_final(self, order_id: int, items: list[tuple[str, float, float, str]],
                               total: float) -> None:

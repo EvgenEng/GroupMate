@@ -140,6 +140,11 @@ class Settings:
     order_reminders_enabled: bool = True
     order_reminder_weekdays: tuple[int, ...] = (4,)  # 0=пн … 4=пт
     order_reminder_time: tuple[int, int] = (12, 0)
+    cart_reminders_enabled: bool = True     # ВК: один раз напомнить о брошенной корзине
+    cart_reminder_hours: int = 24           # через сколько часов после последнего действия напомнить
+    review_requests_enabled: bool = True    # ВК: просить оценить заказ после выдачи
+    review_request_days: int = 3            # через сколько дней после выдачи заказа
+    review_url: str = ""                    # куда звать оставить публичный отзыв (необязательно)
 
     # Кому приходят уведомления о заказах (и кто может менять их статус)
     order_notify_tg: tuple[str, ...] = ()
@@ -238,6 +243,11 @@ def load_settings() -> Settings:
         order_reminders_enabled=_bool("ORDER_REMINDERS_ENABLED", True),
         order_reminder_weekdays=_weekdays(_str("ORDER_REMINDER_WEEKDAYS"), (4,)),
         order_reminder_time=_time("ORDER_REMINDER_TIME", "12:00"),
+        cart_reminders_enabled=_bool("CART_REMINDERS_ENABLED", True),
+        cart_reminder_hours=max(1, _int("CART_REMINDER_HOURS", 24)),
+        review_requests_enabled=_bool("REVIEW_REQUESTS_ENABLED", True),
+        review_request_days=max(1, _int("REVIEW_REQUEST_DAYS", 3)),
+        review_url=_str("REVIEW_URL"),
         order_notify_tg=_handles("ORDER_NOTIFY_TG"),
         order_notify_vk=_handles("ORDER_NOTIFY_VK"),
         payment_details=_str("PAYMENT_DETAILS").replace("\\n", "\n"),   # в .env одной строкой, «\n» — перенос

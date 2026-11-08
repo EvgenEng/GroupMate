@@ -202,6 +202,15 @@ def weigh_confirm(order_id: int) -> dict:
                     callback("❌ Отмена", {"a": "w_cancel"}, "negative")]])
 
 
+# ── напоминание о корзине и оценка заказа ──
+def cart_reminder() -> dict:
+    return inline([[text("🛒 Открыть корзину", {"cmd": "cart"}, "positive")]])
+
+
+def review_stars(order_id: int) -> dict:
+    return inline([[callback(f"{n}⭐", {"a": "rv", "o": order_id, "r": n}) for n in range(1, 6)]])
+
+
 # ── «Повторить заказ» (покупатель) ──
 def repeat_button(order_id: int) -> dict:
     return inline([[callback("🔁 Повторить заказ", {"a": "repeat", "o": order_id}, "positive")]])

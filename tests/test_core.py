@@ -437,3 +437,128 @@ class WeighingAndRepeatCoreTests(unittest.TestCase):
 
             asyncio.run(scenario())
             db.close()
+
+
+class StatsAndExportCoreTests(unittest.TestCase):
+    """Статистика для админов, таблица Excel и новые выборки из базы."""
+
+    NOW = datetime(2026, 11, 8, 12, 0)
+
+    @staticmethod
+    def make(order_id, user, when, items, status="done", platform="vk", final=None):
+        total = sum(q * p for _n, q, p, _u in items)
+        o = od.OrderView(order_id, f"Покупатель {user}", None, user, "+7 900", "", items, total, status, when, platform)
+        if final is not None:
+            o.final_items, o.final_total = final, sum(q * p for _n, q, p, _u in final)
+        return o
+
+    def orders(self):
+        shejka, nabor = ("Шейка классическая в/к", 1.5, 1700.0, "кг"), ("Набор «Мясной стол»", 1.0, 3490.0, "шт")
+        return [
+            self.make(1, 10, "01.09.2026 10:00", [shejka]),                                   # давно, покупатель 10 — старый
+            self.make(2, 10, "05.11.2026 10:00", [shejka], final=[("Шейка классическая в/к", 1.35, 1700.0, "кг")]),
+            self.make(3, 11, "06.11.2026 11:00", [nabor], status="accepted"),                 # новый покупатель
+            self.make(4, 12, "07.11.2026 12:00", [nabor], status="cancelled"),                # отменён — не в выручке
+            self.make(5, 13, "20.10.2026 09:00", [nabor]),                                    # вне недели
+        ]
+
+    def test_parse_days(self):
+        from app.core.stats import parse_days
+        cases = {"": 7, "30": 30, "30 дней": 30, "неделя": 7, "месяц": 30, "0": 1, "9999": 366, "abc": 7}
+        for text, expected in cases.items():
+            self.assertEqual(parse_days(text, 7), expected, text)
+
+    def test_compute_stats_week(self):
+        from app.core.stats import compute_stats
+        s = compute_stats(self.orders(), self.NOW, 7, ratings=[5, 4, 2], joined=[(1.0, 11), (2.0, 99)])
+        self.assertEqual((s.orders, s.cancelled, s.weighed), (2, 1, 1))
+        self.assertAlmostEqual(s.revenue, 1700 * 1.35 + 3490)            # у взвешенного — сумма по факту
+        self.assertAlmostEqual(s.avg_check, (1700 * 1.35 + 3490) / 2)
+        self.assertEqual((s.buyers, s.new_buyers), (2, 1))                # покупатель 10 уже заказывал раньше
+        self.assertEqual(s.top[0][0], "Набор «Мясной стол»")
+        self.assertEqual(s.by_status, {"done": 1, "accepted": 1, "cancelled": 1})
+        self.assertEqual((s.rating_count, round(s.rating_avg, 2)), (3, 3.67))
+        self.assertEqual((s.joined, s.joined_ordered), (2, 1))            # из двух подписчиков заказал один
+
+    def test_format_stats_and_empty_period(self):
+        from app.core.stats import compute_stats, format_stats
+        text = format_stats(compute_stats(self.orders(), self.NOW, 7, ratings=[5]), "₽")
+        self.assertIn("Статистика за 7 дней", text)
+        self.assertIn("Заказов: <b>2</b> (отменено: 1)", text)
+        self.assertIn("средний чек", text)
+        self.assertIn("новых: 1, повторных: 1", text)
+        self.assertIn("Оценки покупателей: <b>5,0</b>", text)
+        empty = format_stats(compute_stats([], self.NOW, 30, None), "₽")
+        self.assertIn("за 30 дней", empty.lower().replace("статистика ", ""))
+        self.assertIn("заказов не было", empty)
+
+    def test_export_tables_period_and_weighed_items(self):
+        from app.core.stats import export_tables
+        tables = export_tables(self.orders(), self.NOW, 7, "₽")
+        order_rows, item_rows = tables["Заказы"], tables["Позиции"]
+        self.assertEqual([r[0] for r in order_rows[1:]], [2, 3, 4])      # только за неделю, статусы любые
+        weighed = order_rows[1]
+        self.assertEqual((weighed[8], weighed[9]), (2550.0, 2295.0))      # заказано / по факту
+        self.assertIn("Шейка классическая в/к — 1,35 кг", weighed[7])    # в таблице — фактический вес
+        self.assertEqual(len(item_rows), 4)
+        self.assertEqual(item_rows[1][-1], "да")
+
+    def test_xlsx_is_valid_and_escapes_text(self):
+        import zipfile
+        import xml.etree.ElementTree as ET
+        from app.core.xlsx import write_xlsx
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_xlsx(Path(tmp) / "t.xlsx", {"Заказы": [["№", "Состав"], [1, 'Шейка & <b> "в/к"\nНабор'], [2, 1700.5]],
+                                                      "Позиции": [["Товар"], ["Карбонад"]]})
+            with zipfile.ZipFile(path) as z:
+                self.assertIsNone(z.testzip())
+                for name in z.namelist():
+                    ET.fromstring(z.read(name))                           # каждый кусок — корректный XML
+                sheet = ET.fromstring(z.read("xl/worksheets/sheet1.xml"))
+                ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                texts = ["".join(t.itertext()) for t in sheet.iterfind(".//m:is", ns)]
+                self.assertIn('Шейка & <b> "в/к"\nНабор', texts)
+                self.assertEqual(sheet.find(".//m:c[@r='B3']/m:v", ns).text, "1700.5")
+                self.assertIn("Позиции", z.read("xl/workbook.xml").decode("utf-8"))
+
+    def test_db_carts_reviews_kv_and_migration(self):
+        import sqlite3
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            old = sqlite3.connect(path)       # база до этих функций: у корзины и заказов нет новых колонок
+            old.execute("CREATE TABLE cart (platform TEXT NOT NULL DEFAULT 'tg', user_id INTEGER NOT NULL, "
+                        "product_id TEXT NOT NULL, qty REAL NOT NULL, PRIMARY KEY (platform, user_id, product_id))")
+            old.execute("INSERT INTO cart VALUES('vk', 1, 'neck', 1.5)")
+            old.commit()
+            old.close()
+            db = Database(path)
+
+            async def scenario():
+                now = time.time()
+                # старая корзина без времени — не считается брошенной
+                self.assertEqual(await db.stale_carts("vk", now, now - 10 * 86400), [])
+                await db.cart_change("vk", 2, "neck", 1.0)
+                await db._a("UPDATE cart SET updated_at=? WHERE user_id=2", (now - 30 * 3600,))
+                await db.cart_change("vk", 3, "neck", 1.0)                      # свежая
+                self.assertEqual([u for u, _ in await db.stale_carts("vk", now - 24 * 3600, now - 72 * 3600)], [2])
+                # выдача заказа запоминает время; оценка ставится один раз
+                oid = await db.create_order("vk", 2, "О", None, "+7", "", [("X", 1.0, 10.0, "кг")], 10.0)
+                self.assertEqual(await db.orders_to_review("vk", now + 1, now - 1), [])
+                await db.set_order_status(oid, "done")
+                self.assertEqual([o.id for o in await db.orders_to_review("vk", now + 5, now - 5)], [oid])
+                self.assertEqual(await db.orders_to_review("tg", now + 5, now - 5), [])
+                self.assertTrue(await db.add_review(oid, "vk", 2, 5))
+                self.assertFalse(await db.add_review(oid, "vk", 2, 1))
+                await db.set_review_comment(oid, "Вкусно")
+                self.assertEqual((await db.review(oid))["comment"], "Вкусно")
+                self.assertEqual(await db.ratings_since(now - 5), [5])
+                # выборка kv по префиксу (подчёркивания и проценты — обычные символы)
+                await db.kv_set("welcome:vk:1", {"ts": 1.0})
+                await db.kv_set("welcome:vk:2", {"ts": 2.0})
+                await db.kv_set("other:vk:3", 1)
+                self.assertEqual(set(await db.kv_prefix("welcome:vk:")), {"welcome:vk:1", "welcome:vk:2"})
+                self.assertEqual(len(await db.all_orders()), 1)
+
+            asyncio.run(scenario())
+            db.close()

@@ -8,11 +8,12 @@ Telegram-клавиатуры импортируются внутри функц
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from app.config import Settings
 from app.core.birthdays import order_on_birthday
-from app.core.orders import (Catalog, OrderView, STATUS_FOR_CUSTOMER, format_final_message, format_manager_order,
-                             order_has_weight)
+from app.core.orders import (Catalog, OrderView, STATUS_FOR_CUSTOMER, build_lines, cart_total, fmt_qty,
+                             format_final_message, format_manager_order, has_weight_items, money, order_has_weight)
 from app.services.db import Database
 from app.vk import keyboards as vk_kb
 from app.vk.format import html_to_vk
@@ -156,6 +157,24 @@ class Messenger:
             await self._vk_send(order.user_id, text, vk_kb.repeat_button(order.id))
             return
         await self.to_user(order.platform, order.user_id, text)
+
+    async def remind_cart(self, user_id: int) -> bool:
+        """Мягкое напоминание о брошенной корзине (ВК). False — корзина уже пуста или сообщение не дошло."""
+        lines = build_lines(await self.db.cart("vk", user_id), self.catalog)
+        if not lines:
+            return False
+        approx = has_weight_items(l.product.unit for l in lines)
+        rows = ["🛒 Кажется, вы не успели оформить заказ — товары ждут вас в корзине:", ""]
+        rows += [f"• {escape(l.product.name)} — {fmt_qty(l.qty)} {escape(l.product.unit)}" for l in lines]
+        rows += ["", f"Итого {'≈ ' if approx else ''}{money(cart_total(lines), self.catalog.currency)}", "",
+                 "Если нужна помощь с выбором или остались вопросы — просто напишите, подскажем 🙂"]
+        return await self._vk_send(user_id, "\n".join(rows), vk_kb.cart_reminder())
+
+    async def ask_review(self, order: OrderView) -> bool:
+        """Просьба оценить выданный заказ (ВК): пять кнопок-звёзд."""
+        text = (f"💛 <b>Как вам заказ №{order.id}?</b>\n\n"
+                "Надеемся, всё пришлось по вкусу! Оцените, пожалуйста, — нам очень важно ваше мнение.")
+        return await self._vk_send(order.user_id, text, vk_kb.review_stars(order.id))
 
     async def notify_final(self, order: OrderView) -> bool:
         """Итог после взвешивания и реквизиты — покупателю. False — не дошло (например, закрыты сообщения)."""

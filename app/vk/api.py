@@ -86,6 +86,23 @@ class VkApi:
         key = f"_{photo['access_key']}" if photo.get("access_key") else ""
         return f"photo{photo['owner_id']}_{photo['id']}{key}"
 
+    async def upload_message_doc(self, peer_id: int, path, title: str | None = None) -> str:
+        """Загружает файл (например, таблицу Excel) для отправки в сообщении и возвращает вложение вида doc1_2."""
+        from pathlib import Path
+
+        import aiohttp
+
+        path = Path(path)
+        server = await self.call("docs.getMessagesUploadServer", type="doc", peer_id=peer_id)
+        session = await self._http()
+        form = aiohttp.FormData()
+        form.add_field("file", path.read_bytes(), filename=path.name, content_type="application/octet-stream")
+        async with session.post(server["upload_url"], data=form) as resp:
+            uploaded = await resp.json(content_type=None)
+        saved = await self.call("docs.save", file=uploaded["file"], title=title or path.name)
+        doc = saved["doc"] if isinstance(saved, dict) and "doc" in saved else saved[0]
+        return f"doc{doc['owner_id']}_{doc['id']}"
+
     async def answer_event(self, event_id: str, user_id: int, peer_id: int, text: str | None = None,
                            link: str | None = None):
         if link:

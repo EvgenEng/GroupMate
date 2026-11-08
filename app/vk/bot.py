@@ -12,6 +12,7 @@ import json
 import logging
 import random
 import re
+import time
 from html import escape
 
 from app import jobs
@@ -19,6 +20,8 @@ from app.context import AppContext
 from app.core import birthdays as bd
 from app.core.faq_bot import FaqBot, Reply
 from app.core.knowledge import HANDOFF_FALLBACK, format_handoff, split_handoff
+from app.core.stats import compute_stats, export_tables, format_stats, parse_days
+from app.core.xlsx import write_xlsx
 from app.core.orders import STATUSES, OrderView, apply_weights, catalog_intro, checkout_comment_hint, fmt_qty, \
     format_cart, format_order, format_product, format_weighing, money, order_has_weight, parse_weight, weight_indexes
 from app.services import weather_reports
@@ -50,7 +53,7 @@ PHRASES = {
 ARG_COMMANDS = {"mybd": "mybd", "др": "mybd", "bd_add": "bd_add", "bd_del": "bd_del"}
 CHECKOUT_BUTTONS = {"no_comment", "use_name", "use_phone", "skip_bd", "no_phone", "w_same"}
 HANDOFF_DAILY_CAP = 5   # сколько раз в сутки один человек может передать вопрос менеджеру
-ADMIN_COMMANDS = {"test_morning", "test_evening", "test_bd", "bd_list", "bd_sync", "bd_add", "bd_del"}
+ADMIN_COMMANDS = {"test_morning", "test_evening", "test_bd", "bd_list", "bd_sync", "bd_add", "bd_del", "stats", "export"}
 
 WELCOMES = [
     "Привет, {name}! 👋 Добро пожаловать в беседу — располагайтесь как дома.",
@@ -128,6 +131,7 @@ class VkBot:
         self._greeted: dict[int, float] = {}
         self._tasks: set[asyncio.Task] = set()
         self._welcome_lock = asyncio.Lock()   # событие подписки и «разрешил сообщения» бывают рядом
+        self.review_wait: dict[int, tuple[int, float]] = {}   # низкая оценка: user_id → (заказ, когда); ждём «что не так»
 
     # ── запуск ────────────────────────────────────────────────
     async def start(self) -> None:
@@ -236,6 +240,8 @@ class VkBot:
             await self.on_first_contact(from_id)
             if await self.send_pending_welcome(from_id) and self._only_greeting(text, payload):
                 return  # подписчик только поздоровался или нажал «Начать» — приветствие он уже получил
+            if await self.take_review_comment(from_id, text, payload):
+                return
             state = self.checkout.get(from_id)
             menu_press = bool(payload) and (payload.get("command") == "start"
                                             or payload.get("cmd") not in (None, *CHECKOUT_BUTTONS))
@@ -316,7 +322,7 @@ class VkBot:
                 return  # повторное событие или человек вернулся — второго приветствия не будет
             if await self.can_write(user_id) and await self._deliver_welcome(user_id):
                 return
-            await self.ctx.db.kv_set(welcome_key(user_id), {"state": "pending"})
+            await self.ctx.db.kv_set(welcome_key(user_id), {"state": "pending", "ts": time.time()})
             logger.info("ВК: подписчик %s пока не разрешил сообщения — приветствие ждёт", user_id)
 
     async def send_pending_welcome(self, user_id: int) -> bool:
@@ -335,7 +341,8 @@ class VkBot:
         except VkApiError as exc:
             logger.warning("ВК: приветствие подписчику %s не отправлено: %s", user_id, exc)
             return False
-        await self.ctx.db.kv_set(welcome_key(user_id), {"state": "sent"})
+        old = await self.ctx.db.kv_get(welcome_key(user_id), {}) or {}
+        await self.ctx.db.kv_set(welcome_key(user_id), {"state": "sent", "ts": old.get("ts") or time.time()})
         self._greeted[user_id] = asyncio.get_running_loop().time()   # «Начать» следом не повторит приветствие
         logger.info("ВК: приветствие новому подписчику %s отправлено", user_id)
         return True
@@ -489,6 +496,10 @@ class VkBot:
             await self.send(peer_id, f"✅ Добавлено (ID {bd_id}): {escape(name)} — {parsed[0]:02d}.{parsed[1]:02d}")
         elif cmd == "bd_sync":
             await self.bd_sync(peer_id)
+        elif cmd == "stats":
+            await self.send(peer_id, await self.stats_text(parse_days(arg, 7)))
+        elif cmd == "export":
+            await self.export_orders(peer_id, parse_days(arg, 30))
 
     async def bd_sync(self, peer_id: int) -> None:
         """Импорт дней рождения участников беседы из их профилей (если дата не скрыта)."""
@@ -736,6 +747,9 @@ class VkBot:
             await self.send(user_id, "Хорошо, не передаю. Если что — я на связи 🙂", kb.main_menu())
         elif action == "repeat":
             snackbar = await self.repeat_order(user_id, self._int(payload.get("o")))
+        elif action == "rv":
+            snackbar = await self.on_rating(user_id, peer_id, cmid, self._int(payload.get("o")),
+                                            self._int(payload.get("r")))
         elif action == "wstart":
             snackbar = await self.weigh_start(user_id, self._int(payload.get("o")))
         elif action == "w_send":
@@ -901,6 +915,81 @@ class VkBot:
             return int(value)
         except (TypeError, ValueError):
             return 0
+
+    # ── статистика и выгрузка (админы) ─────────────────────────
+    async def stats_text(self, days: int) -> str:
+        ctx = self.ctx
+        now = ctx.now()
+        since = now.timestamp() - days * 86400
+        welcomes = await ctx.db.kv_prefix("welcome:vk:")
+        joined = [(v["ts"], int(key.rsplit(":", 1)[1])) for key, v in welcomes.items()
+                  if isinstance(v, dict) and v.get("ts") and v["ts"] >= since]
+        stats = compute_stats(await ctx.db.all_orders(), now, days, await ctx.db.ratings_since(since), joined)
+        return format_stats(stats, ctx.catalog.currency)
+
+    async def export_orders(self, peer_id: int, days: int) -> None:
+        ctx = self.ctx
+        now = ctx.now()
+        tables = export_tables(await ctx.db.all_orders(), now, days, ctx.catalog.currency)
+        count = len(tables["Заказы"]) - 1
+        if not count:
+            await self.send(peer_id, f"За последние {days} дн. заказов нет — выгружать нечего.")
+            return
+        path = write_xlsx(ctx.settings.db_path.parent / "exports" / f"gastrodom_orders_{now:%Y-%m-%d_%H%M}.xlsx", tables)
+        try:
+            attachment = await self.api.upload_message_doc(peer_id, path, path.name)
+            await self.api.send(peer_id, f"📎 Заказы за {days} дн.: {count} шт. Откройте файл в Excel.",
+                                attachment=attachment)
+        except Exception as exc:  # noqa: BLE001 — не получилось отправить файл, но таблица уже сохранена
+            logger.warning("ВК: не удалось отправить таблицу: %s", exc)
+            await self.send(peer_id, f"Таблица готова ({count} заказов), но отправить файл в ВК не получилось. "
+                                     f"Он лежит на компьютере бота: <code>{escape(str(path))}</code>")
+
+    # ── оценка заказа ───────────────────────────────────────────
+    async def on_rating(self, user_id: int, peer_id: int, cmid: int | None, order_id: int, rating: int) -> str | None:
+        order = await self.ctx.db.order(order_id)
+        if not order or order.platform != PLATFORM or order.user_id != user_id or not 1 <= rating <= 5:
+            return "Заказ не найден"
+        if not await self.ctx.db.add_review(order_id, PLATFORM, user_id, rating):
+            return "Вы уже оценили этот заказ — спасибо!"
+        await self.edit_or_send(peer_id, cmid, f"Ваша оценка заказа №{order_id}: {'⭐' * rating}", None)
+        url = self.ctx.settings.review_url
+        if rating >= 4:
+            text = "Спасибо за тёплую оценку! 💛"
+            if url:
+                text += f"\n\nЕсли не сложно, поделитесь впечатлением и в отзывах — для нас это очень важно: {url}"
+            await self.send(user_id, text)
+        else:
+            self.review_wait[user_id] = (order_id, asyncio.get_running_loop().time())
+            await self.send(user_id, "Спасибо, что сказали честно, и простите, если что-то пошло не так 🙏\n"
+                                     "Напишите, пожалуйста, одним сообщением, что именно, — мы разберёмся и всё исправим.")
+            await self.ctx.messenger.notify_handoff(
+                f"⚠️ Низкая оценка {rating}/5 по заказу №{order_id} — {self.mention(user_id, order.customer_name or 'покупатель')}. "
+                "Покупателя попросили написать, что не так.")
+        return "Спасибо за оценку!"
+
+    async def take_review_comment(self, user_id: int, text: str, payload: dict | None) -> bool:
+        """Покупатель после низкой оценки пишет, что не так: передаём менеджерам. True — сообщение забрали."""
+        wait = self.review_wait.get(user_id)
+        if not wait or not text.strip() or payload:
+            return False
+        order_id, since = wait
+        if asyncio.get_running_loop().time() - since > 86400:   # сутки ждали, больше не караулим
+            self.review_wait.pop(user_id, None)
+            return False
+        if resolve_command(text, payload)[0]:
+            return False                                         # это команда, а не отзыв
+        reply = self.faq.answer(text)
+        if "?" in text and reply is not None and reply.text:
+            return False                                         # это вопрос («сколько стоит…?») — отвечаем как всегда
+        self.review_wait.pop(user_id, None)
+        await self.ctx.db.set_review_comment(order_id, text.strip()[:1000])
+        order = await self.ctx.db.order(order_id)
+        who = self.mention(user_id, order.customer_name if order and order.customer_name else "покупатель")
+        await self.ctx.messenger.notify_handoff(
+            f"💬 Отзыв по заказу №{order_id} от {who}:\n\n{escape(text.strip()[:1000])}")
+        await self.send(user_id, "Спасибо! Передали менеджеру — он обязательно свяжется с вами 🙏", kb.main_menu())
+        return True
 
     # ── «Повторить заказ» ─────────────────────────────────────
     async def repeat_order(self, user_id: int, order_id: int | None = None) -> str | None:

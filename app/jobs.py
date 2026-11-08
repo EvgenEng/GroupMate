@@ -88,6 +88,38 @@ async def order_reminder(ctx: AppContext, now: datetime) -> None:
         await ctx.messenger.to_groups(weekly_text(), order_button=True)
 
 
+# ── напоминание о брошенной корзине и просьба оценить заказ (ВКонтакте) ──
+CART_REMINDER_MAX_AGE_DAYS = 3   # корзине старше этого срока уже не напоминаем — человек, скорее всего, передумал
+CART_REMINDER_PAUSE_DAYS = 7     # одному человеку не чаще раза в неделю
+
+
+async def cart_reminders(ctx: AppContext, now: datetime) -> None:
+    ts = now.timestamp()
+    s = ctx.settings
+    for user_id, last in await ctx.db.stale_carts("vk", ts - s.cart_reminder_hours * 3600,
+                                                  ts - CART_REMINDER_MAX_AGE_DAYS * 86400):
+        key = f"cartrem:vk:{user_id}"
+        state = await ctx.db.kv_get(key, {}) or {}
+        if state.get("sent") and ts - state["sent"] < CART_REMINDER_PAUSE_DAYS * 86400:
+            continue
+        await ctx.db.kv_set(key, {"sent": ts, "cart_ts": last})   # отметка до отправки: не пробуем повторно каждые полчаса
+        if await ctx.messenger.remind_cart(user_id):
+            logger.info("Напоминание о корзине отправлено: ВК %s", user_id)
+
+
+async def review_requests(ctx: AppContext, now: datetime) -> None:
+    ts = now.timestamp()
+    days = ctx.settings.review_request_days
+    # окно в неделю: старые заказы (до включения функции) не поднимаем
+    for order in await ctx.db.orders_to_review("vk", ts - days * 86400, ts - (days + 7) * 86400):
+        key = f"review:ask:{order.id}"
+        if await ctx.db.kv_get(key):
+            continue
+        await ctx.db.kv_set(key, {"sent": ts})
+        if await ctx.messenger.ask_review(order):
+            logger.info("Просьба об оценке заказа №%s отправлена", order.id)
+
+
 def register(scheduler: Scheduler, ctx: AppContext) -> None:
     s = ctx.settings
     if s.weather_enabled:
@@ -102,3 +134,7 @@ def register(scheduler: Scheduler, ctx: AppContext) -> None:
     if s.order_reminders_enabled:
         # Каждый день проверяем праздники; обычное напоминание — только в выбранные дни недели.
         scheduler.daily("Напоминание о заказах", s.order_reminder_time, lambda now: order_reminder(ctx, now))
+    if s.cart_reminders_enabled:
+        scheduler.every("Напоминание о корзине", 30, lambda now: cart_reminders(ctx, now), hours=(10, 20))
+    if s.review_requests_enabled:
+        scheduler.every("Просьба об оценке заказа", 60, lambda now: review_requests(ctx, now), hours=(11, 19))

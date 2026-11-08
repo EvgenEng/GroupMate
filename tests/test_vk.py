@@ -39,6 +39,7 @@ class FakeApi:
         self.links: list[str | None] = []
         self.allowed = {CUSTOMER, MANAGER, ADMIN}
         self.attachments: list[tuple[int, str]] = []
+        self.doc_uploads: list[tuple[int, str]] = []
 
     async def call(self, method, **params):
         self.calls.append(method)
@@ -64,6 +65,10 @@ class FakeApi:
     async def upload_message_photo(self, peer_id, path):
         self.uploads += 1
         return "photo-239343586_1_key"
+
+    async def upload_message_doc(self, peer_id, path, title=None):
+        self.doc_uploads.append((peer_id, Path(path).name))
+        return "doc1_2"
 
     async def edit(self, peer_id, cmid, text, keyboard=None):
         self.edits.append((peer_id, cmid, text, keyboard))
@@ -893,3 +898,207 @@ class VkRepeatAndWeighingTests(VkTestCase):
                     self.assertLessEqual(len(b["action"]["label"]), kb.LABEL_MAX)
                     self.assertLessEqual(len(b["action"].get("payload", "")), 255)
         self.assertIsNone(kb.repeat_orders([]))
+
+
+class VkStatsCartAndReviewTests(VkTestCase):
+    """Статистика и выгрузка для админов, напоминание о корзине, просьба об оценке."""
+
+    ITEMS = [("Шейка классическая в/к", 1.5, 1700.0, "кг")]
+
+    def make_order(self, user=CUSTOMER, items=None, status="new"):
+        items = items or self.ITEMS
+        total = sum(qty * price for _n, qty, price, _u in items)
+        oid = asyncio.run(self.ctx.db.create_order("vk", user, "Смирнова Ольга", "olga", "+7 999 123-45-67",
+                                                   "", items, total))
+        if status != "new":
+            asyncio.run(self.ctx.db.set_order_status(oid, status))
+        return oid
+
+    def sql(self, query, params=()):
+        asyncio.run(self.ctx.db._a(query, params))
+
+    def now_ts(self):
+        return self.ctx.now().timestamp()
+
+    # ── /stats и /export ─────────────────────────────────────
+    def test_stats_only_for_admins_and_with_period(self):
+        self.make_order(status="done")
+        self.make_order(user=STRANGER)
+        self.run_all(message(CUSTOMER, CUSTOMER, "/stats"), message(MANAGER, MANAGER, "/export"))
+        self.assertFalse(any("Статистика" in t for t in self.api.texts_to(CUSTOMER)))   # не админам — тишина
+        self.assertFalse(any("Статистика" in t for t in self.api.texts_to(MANAGER)))
+        self.assertEqual(self.api.doc_uploads, [])
+        self.run_all(message(ADMIN, ADMIN, "/stats"))
+        text = self.api.texts_to(ADMIN)[-1]
+        self.assertIn("Статистика за 7 дней", text)
+        self.assertIn("Заказов: 2", text)
+        self.assertIn("Выручка: 5 100 ₽", text)
+        self.assertIn("новых: 2, повторных: 0", text)
+        self.assertIn("Шейка классическая в/к — 3 кг", text)
+        self.run_all(message(ADMIN, ADMIN, "/stats 30"), message(ADMIN, ADMIN, "/stats месяц"))
+        self.assertTrue(all("за 30 дней" in t for t in self.api.texts_to(ADMIN)[-2:]))
+
+    def test_stats_counts_new_subscribers_and_ratings(self):
+        self.run_all({"type": "group_join", "object": {"user_id": CUSTOMER, "join_type": "join"}},
+                     {"type": "group_join", "object": {"user_id": STRANGER, "join_type": "join"}})
+        oid = self.make_order(status="done")
+        asyncio.run(self.ctx.db.add_review(oid, "vk", CUSTOMER, 4))
+        self.run_all(message(ADMIN, ADMIN, "/stats"))
+        text = self.api.texts_to(ADMIN)[-1]
+        self.assertIn("Новых подписчиков: 2, из них уже заказали: 1", text)
+        self.assertIn("Оценки покупателей: 4,0 из 5 (1)", text)
+
+    def test_export_sends_excel_file_and_falls_back_to_path(self):
+        self.run_all(message(ADMIN, ADMIN, "/export"))
+        self.assertTrue(any("выгружать нечего" in t for t in self.api.texts_to(ADMIN)))
+        self.make_order(status="done")
+        self.run_all(message(ADMIN, ADMIN, "/export 14"))
+        self.assertEqual(len(self.api.doc_uploads), 1)
+        name = self.api.doc_uploads[0][1]
+        self.assertTrue(name.startswith("gastrodom_orders_") and name.endswith(".xlsx"))
+        self.assertEqual(self.api.attachments[-1], (ADMIN, "doc1_2"))
+        self.assertTrue((Path(self.tmp.name) / "exports" / name).exists())   # копия остаётся на компьютере бота
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("нет права на документы")
+
+        self.api.upload_message_doc = broken
+        self.run_all(message(ADMIN, ADMIN, "/export"))
+        self.assertTrue(any("отправить файл в ВК не получилось" in t and "exports" in t
+                            for t in self.api.texts_to(ADMIN)))
+
+    # ── напоминание о брошенной корзине ──────────────────────
+    def cart_aged(self, user, hours):
+        asyncio.run(self.ctx.db.cart_change("vk", user, "neck", 1.5))
+        self.sql("UPDATE cart SET updated_at=? WHERE user_id=?", (self.now_ts() - hours * 3600, user))
+
+    def remind(self):
+        asyncio.run(jobs.cart_reminders(self.ctx, self.ctx.now()))
+
+    def reminders(self, user):
+        return [(t, k) for p, t, k in self.api.sent if p == user and "не успели оформить" in t]
+
+    def test_cart_reminder_once_after_a_day(self):
+        self.cart_aged(CUSTOMER, 25)
+        self.cart_aged(STRANGER, 2)             # свежая корзина — рано
+        self.remind()
+        sent = self.reminders(CUSTOMER)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Шейка классическая в/к — 1,5 кг", sent[0][0])
+        self.assertIn("Итого ≈ 2 550 ₽", sent[0][0])
+        button = sent[0][1]["buttons"][0][0]["action"]
+        self.assertEqual(json.loads(button["payload"]), {"cmd": "cart"})
+        self.assertEqual(self.reminders(STRANGER), [])
+        self.remind()                            # повторный запуск задачи — второго напоминания нет
+        self.assertEqual(len(self.reminders(CUSTOMER)), 1)
+        self.run_all(message(CUSTOMER, CUSTOMER, "🛒 Открыть корзину", {"cmd": "cart"}))   # кнопка из напоминания
+        self.assertTrue(self.api.texts_to(CUSTOMER)[-1].startswith("🛒 Ваша корзина"))
+
+    def test_cart_reminder_skips_old_empty_and_recently_reminded(self):
+        self.cart_aged(CUSTOMER, 24 * 5)         # корзина забыта пять дней назад — уже не напоминаем
+        self.remind()
+        self.assertEqual(self.reminders(CUSTOMER), [])
+        self.cart_aged(CUSTOMER, 30)
+        self.sql("DELETE FROM cart WHERE user_id=?", (CUSTOMER,))           # человек сам очистил корзину
+        self.remind()
+        self.assertEqual(self.reminders(CUSTOMER), [])
+        self.cart_aged(CUSTOMER, 30)
+        asyncio.run(self.ctx.db.kv_set(f"cartrem:vk:{CUSTOMER}", {"sent": self.now_ts() - 2 * 86400}))
+        self.remind()                            # неделя ещё не прошла
+        self.assertEqual(self.reminders(CUSTOMER), [])
+        asyncio.run(self.ctx.db.kv_set(f"cartrem:vk:{CUSTOMER}", {"sent": self.now_ts() - 8 * 86400}))
+        self.remind()                            # прошло больше недели — можно снова
+        self.assertEqual(len(self.reminders(CUSTOMER)), 1)
+
+    def test_cart_reminder_can_be_switched_off(self):
+        self.ctx.settings.__dict__["cart_reminders_enabled"] = False
+        from app.scheduler import Scheduler
+        scheduler = Scheduler("Europe/Moscow")
+        jobs.register(scheduler, self.ctx)
+        names = [name for name, _ in scheduler._specs]
+        self.assertNotIn("Напоминание о корзине", names)
+        self.assertIn("Просьба об оценке заказа", names)
+
+    # ── просьба об оценке и сама оценка ──────────────────────
+    def done_days_ago(self, order_id, days):
+        self.sql("UPDATE orders SET done_at=? WHERE id=?", (self.now_ts() - days * 86400, order_id))
+
+    def ask(self):
+        asyncio.run(jobs.review_requests(self.ctx, self.ctx.now()))
+
+    def asks(self, user=CUSTOMER):
+        return [(t, k) for p, t, k in self.api.sent if p == user and "Как вам заказ" in t]
+
+    def test_review_request_after_three_days_once(self):
+        fresh, ready, due, old = (self.make_order(status="done"), self.make_order(status="ready"),
+                                  self.make_order(status="done"), self.make_order(status="done"))
+        self.done_days_ago(fresh, 1)
+        self.done_days_ago(due, 4)
+        self.done_days_ago(old, 20)              # слишком давно — не тревожим
+        self.sql("UPDATE orders SET done_at=? WHERE id=?", (self.now_ts() - 4 * 86400, ready))
+        self.sql("UPDATE orders SET status='ready' WHERE id=?", (ready,))
+        self.ask()
+        asks = self.asks()
+        self.assertEqual(len(asks), 1)
+        self.assertIn(f"заказ №{due}?", asks[0][0].replace("Как вам ", ""))
+        rows = asks[0][1]["buttons"]
+        self.assertEqual([b["action"]["label"] for b in rows[0]], ["1⭐", "2⭐", "3⭐", "4⭐", "5⭐"])
+        self.ask()                               # повторный запуск — второй просьбы нет
+        self.assertEqual(len(self.asks()), 1)
+
+    def test_high_rating_thanks_and_optional_review_link(self):
+        oid = self.make_order(status="done")
+        self.ctx.settings.__dict__["review_url"] = "https://vk.ru/topic-1_2"
+        self.run_all(event(CUSTOMER, {"a": "rv", "o": oid, "r": 5}))
+        self.assertEqual(asyncio.run(self.ctx.db.review(oid))["rating"], 5)
+        self.assertEqual(self.api.snackbars[-1], "Спасибо за оценку!")
+        self.assertIn(f"Ваша оценка заказа №{oid}: ⭐⭐⭐⭐⭐", self.api.edits[-1][2])
+        thanks = self.api.texts_to(CUSTOMER)[-1]
+        self.assertIn("Спасибо за тёплую оценку", thanks)
+        self.assertIn("https://vk.ru/topic-1_2", thanks)
+        self.assertEqual(self.api.texts_to(MANAGER), [])                  # о хорошей оценке менеджеров не дёргаем
+        self.run_all(event(CUSTOMER, {"a": "rv", "o": oid, "r": 1}))      # повторное нажатие не меняет оценку
+        self.assertEqual(self.api.snackbars[-1], "Вы уже оценили этот заказ — спасибо!")
+        self.assertEqual(asyncio.run(self.ctx.db.review(oid))["rating"], 5)
+
+    def test_rating_only_for_own_order(self):
+        oid = self.make_order(CUSTOMER, status="done")
+        self.run_all(event(STRANGER, {"a": "rv", "o": oid, "r": 5}), event(CUSTOMER, {"a": "rv", "o": oid, "r": 9}),
+                     event(CUSTOMER, {"a": "rv", "o": 999, "r": 5}))
+        self.assertEqual(self.api.snackbars[-3:], ["Заказ не найден"] * 3)
+        self.assertIsNone(asyncio.run(self.ctx.db.review(oid)))
+
+    def test_low_rating_collects_comment_for_managers(self):
+        oid = self.make_order(status="done")
+        self.run_all(event(CUSTOMER, {"a": "rv", "o": oid, "r": 2}))
+        self.assertTrue(any(f"Низкая оценка 2/5 по заказу №{oid}" in t for t in self.api.texts_to(MANAGER)))
+        self.assertIn("Напишите, пожалуйста, одним сообщением", self.api.texts_to(CUSTOMER)[-1])
+        # вопрос про цену в это время — обычный вопрос, а не жалоба
+        self.run_all(message(CUSTOMER, CUSTOMER, "сколько стоит шейка?"))
+        self.assertEqual(asyncio.run(self.ctx.db.review(oid))["comment"], None)
+        self.assertIn(CUSTOMER, self.bot.review_wait)
+        self.run_all(message(CUSTOMER, CUSTOMER, "Мясо было суховато, и привезли с опозданием"))
+        self.assertEqual(asyncio.run(self.ctx.db.review(oid))["comment"], "Мясо было суховато, и привезли с опозданием")
+        self.assertTrue(any(f"Отзыв по заказу №{oid}" in t and "суховато" in t for t in self.api.texts_to(MANAGER)))
+        self.assertIn("Передали менеджеру", self.api.texts_to(CUSTOMER)[-1])
+        self.assertNotIn(CUSTOMER, self.bot.review_wait)
+        before = len(self.api.texts_to(MANAGER))
+        self.run_all(message(CUSTOMER, CUSTOMER, "ещё одно сообщение"))   # дальше — обычный диалог, менеджерам не уходит
+        self.assertEqual(len(self.api.texts_to(MANAGER)), before)
+
+    def test_menu_button_is_not_taken_as_complaint(self):
+        oid = self.make_order(status="done")
+        self.run_all(event(CUSTOMER, {"a": "rv", "o": oid, "r": 1}))
+        self.run_all(message(CUSTOMER, CUSTOMER, "🛍 Каталог", {"cmd": "catalog"}), message(CUSTOMER, CUSTOMER, "меню"))
+        self.assertIsNone(asyncio.run(self.ctx.db.review(oid))["comment"])
+        self.assertIn(CUSTOMER, self.bot.review_wait)
+
+    def test_new_keyboards_fit_vk_limits(self):
+        for board in (kb.cart_reminder(), kb.review_stars(12345)):
+            rows, buttons = kb.count_buttons(board)
+            self.assertLessEqual(rows, kb.INLINE_MAX_ROWS)
+            self.assertLessEqual(buttons, kb.INLINE_MAX_BUTTONS)
+            for row in board["buttons"]:
+                for b in row:
+                    self.assertLessEqual(len(b["action"]["label"]), kb.LABEL_MAX)
+                    self.assertLessEqual(len(b["action"].get("payload", "")), 255)
