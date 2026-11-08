@@ -57,12 +57,13 @@ MENU_COMMANDS = {
     "🌤 Погода": "weather",
     "ℹ️ Помощь": "help",
     "👤 Связаться с менеджером": "manager",
+    "🔁 Повторить заказ": "repeat",
 }
 
 
 def main_menu() -> dict:
     labels = list(MENU_COMMANDS)
-    rows = [labels[0:2], labels[2:4], labels[4:6], labels[6:7]]
+    rows = [labels[0:2], labels[2:4], labels[4:6], labels[6:8]]
     return {"one_time": False, "buttons": [
         [text(label, {"cmd": MENU_COMMANDS[label]}, "primary" if MENU_COMMANDS[label] == "catalog" else None)
          for label in row] for row in rows]}
@@ -179,10 +180,37 @@ def confirm() -> dict:
                     callback("❌ Отмена", {"a": "co_cancel"}, "negative")]])
 
 
-def order_status(order_id: int) -> dict:
+def order_status(order_id: int, weigh: bool = False) -> dict:
+    """Кнопки менеджера под заказом. weigh=True — в заказе есть весовые позиции, можно ввести фактический вес."""
     keys = ["accepted", "ready", "done", "cancelled"]
     buttons = [callback(STATUSES[k], {"a": "ost", "o": order_id, "s": k}) for k in keys]
-    return inline([buttons[:2], buttons[2:]])
+    rows = [buttons[:2], buttons[2:]]
+    if weigh:
+        rows.append([callback("⚖️ Ввести вес и итог", {"a": "wstart", "o": order_id})])
+    return inline(rows)
+
+
+# ── взвешивание заказа (менеджер) ──
+def weigh_item(same_label: str) -> dict:
+    return inline([[text(same_label, {"cmd": "w_same"})],
+                   [callback("❌ Отмена", {"a": "w_cancel"}, "negative")]])
+
+
+def weigh_confirm(order_id: int) -> dict:
+    return inline([[callback("✅ Отправить клиенту", {"a": "w_send"}, "positive")],
+                   [callback("↩️ Заново", {"a": "wstart", "o": order_id}),
+                    callback("❌ Отмена", {"a": "w_cancel"}, "negative")]])
+
+
+# ── «Повторить заказ» (покупатель) ──
+def repeat_button(order_id: int) -> dict:
+    return inline([[callback("🔁 Повторить заказ", {"a": "repeat", "o": order_id}, "positive")]])
+
+
+def repeat_orders(order_ids: list[int]) -> dict | None:
+    """Под списком «Мои заказы»: по кнопке на каждый заказ (в ВК не больше 6 рядов)."""
+    rows = [[callback(f"🔁 Повторить №{oid}", {"a": "repeat", "o": oid})] for oid in order_ids[:INLINE_MAX_ROWS]]
+    return inline(rows) if rows else None
 
 
 def order_link(url: str, label: str = "🛍 Сделать заказ") -> dict:

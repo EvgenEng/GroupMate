@@ -55,7 +55,9 @@ CREATE TABLE IF NOT EXISTS orders (
     items_json TEXT NOT NULL,
     total REAL NOT NULL,
     status TEXT NOT NULL DEFAULT 'new',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    final_json TEXT,
+    final_total REAL
 );
 CREATE TABLE IF NOT EXISTS usage (
     day TEXT NOT NULL,
@@ -107,6 +109,10 @@ class Database:
             self._conn.execute(f"DROP TABLE {table}_old")
         if self._columns("orders") and "platform" not in self._columns("orders"):
             self._conn.execute("ALTER TABLE orders ADD COLUMN platform TEXT NOT NULL DEFAULT 'tg'")
+        existing = self._columns("orders")
+        if existing and "final_json" not in existing:   # взвешивание заказов: фактические позиции и итог
+            self._conn.execute("ALTER TABLE orders ADD COLUMN final_json TEXT")
+            self._conn.execute("ALTER TABLE orders ADD COLUMN final_total REAL")
         self._conn.commit()
 
     # ── низкоуровневое ─────────────────────────────────────
@@ -225,10 +231,13 @@ class Database:
 
     @staticmethod
     def _order(row) -> OrderView:
+        final = row["final_json"]
         return OrderView(id=row["id"], customer_name=row["customer_name"] or "", username=row["username"],
                          user_id=row["user_id"], phone=row["phone"] or "", comment=row["comment"] or "",
                          items=[tuple(x) for x in json.loads(row["items_json"])], total=row["total"],
-                         status=row["status"], created_at=row["created_at"], platform=row["platform"])
+                         status=row["status"], created_at=row["created_at"], platform=row["platform"],
+                         final_items=[tuple(x) for x in json.loads(final)] if final else None,
+                         final_total=row["final_total"])
 
     async def order(self, order_id: int) -> OrderView | None:
         row = await self._a("SELECT * FROM orders WHERE id=?", (order_id,), "one")
@@ -246,6 +255,12 @@ class Database:
 
     async def set_order_status(self, order_id: int, status: str) -> None:
         await self._a("UPDATE orders SET status=? WHERE id=?", (status, order_id))
+
+    async def set_order_final(self, order_id: int, items: list[tuple[str, float, float, str]],
+                              total: float) -> None:
+        """Итог после взвешивания: позиции с фактическим весом и сумма к оплате."""
+        await self._a("UPDATE orders SET final_json=?, final_total=? WHERE id=?",
+                      (json.dumps(items, ensure_ascii=False), total, order_id))
 
     # ── лимиты обращений к нейросети ───────────────────────
     async def usage_hit(self, day: str, platform: str, user_id: int, cap: int) -> bool:

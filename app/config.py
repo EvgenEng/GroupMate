@@ -144,6 +144,7 @@ class Settings:
     # Кому приходят уведомления о заказах (и кто может менять их статус)
     order_notify_tg: tuple[str, ...] = ()
     order_notify_vk: tuple[str, ...] = ()
+    payment_details: str = ""   # реквизиты для оплаты — бот присылает их покупателю вместе с итогом после взвешивания
 
     # ВКонтакте
     vk_token: str = ""
@@ -239,6 +240,7 @@ def load_settings() -> Settings:
         order_reminder_time=_time("ORDER_REMINDER_TIME", "12:00"),
         order_notify_tg=_handles("ORDER_NOTIFY_TG"),
         order_notify_vk=_handles("ORDER_NOTIFY_VK"),
+        payment_details=_str("PAYMENT_DETAILS").replace("\\n", "\n"),   # в .env одной строкой, «\n» — перенос
         vk_token=_str("VK_TOKEN"),
         vk_group_id=int("".join(ch for ch in _str("VK_GROUP_ID") if ch.isdigit()) or 0),  # «club123» → 123
         vk_chat_peer_id=_int("VK_CHAT_PEER_ID"),

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
@@ -203,6 +204,8 @@ class OrderView:
     status: str
     created_at: str
     platform: str = "tg"
+    final_items: list[tuple[str, float, float, str]] | None = None   # позиции с фактическим весом (после взвешивания)
+    final_total: float | None = None                                # итог по факту
 
 
 def customer_link(platform: str, user_id: int, name: str, username: str | None = None) -> str:
@@ -216,10 +219,14 @@ def customer_link(platform: str, user_id: int, name: str, username: str | None =
 
 def format_order(o: OrderView, currency: str, for_owner: bool = False) -> str:
     rows = [f"🧾 <b>Заказ №{o.id}</b> — {STATUSES.get(o.status, o.status)}", ""]
-    for name, qty, price, unit in o.items:
+    weighed = o.final_items is not None
+    for name, qty, price, unit in (o.final_items if weighed else o.items):
         rows.append(f"• {escape(name)} — {fmt_qty(qty)} {escape(unit)} × {money(price, currency)}")
     rows.append("")
-    rows += _total_row(o.total, currency, has_weight_items(unit for *_, unit in o.items))
+    if weighed:
+        rows.append(f"⚖️ Взвешено. Итого к оплате: <b>{money(_final_total(o), currency)}</b>")
+    else:
+        rows += _total_row(o.total, currency, has_weight_items(unit for *_, unit in o.items))
     if for_owner:
         rows += ["", f"👤 {customer_link(o.platform, o.user_id, o.customer_name, o.username)} "
                      f"· {PLATFORM_NAMES.get(o.platform, o.platform)}",
@@ -237,10 +244,15 @@ def format_manager_order(o: OrderView, currency: str, birthday: str | None = Non
     if birthday_today:
         rows.append("🎁 <b>Именинник!</b> Заказ в день рождения — положите вкусный подарок и поздравьте 🎉")
     rows.append("")
-    for name, qty, _price, unit in o.items:
+    weighed = o.final_items is not None
+    for name, qty, _price, unit in (o.final_items if weighed else o.items):
         rows.append(f"• {escape(name)} — {fmt_qty(qty)} {escape(unit)}")
-    approx = has_weight_items(unit for *_, unit in o.items)
-    rows += ["", f"💰 {'≈ ' if approx else ''}{money(o.total, currency)}", "",
+    if weighed:
+        money_row = f"💰 {money(_final_total(o), currency)} ⚖️ по факту (заказано ≈ {money(o.total, currency)})"
+    else:
+        approx = has_weight_items(unit for *_, unit in o.items)
+        money_row = f"💰 {'≈ ' if approx else ''}{money(o.total, currency)}"
+    rows += ["", money_row, "",
              f"👤 {customer_link(o.platform, o.user_id, o.customer_name, o.username)}",
              f"📞 {escape(o.phone)}"]
     if birthday:
@@ -257,3 +269,106 @@ def checkout_comment_hint(catalog: Catalog) -> str:
     if catalog.shop.lead_time:
         text += f"\n\n⏳ {escape(catalog.shop.lead_time)}"
     return text
+
+
+# ── взвешивание: фактический вес → итог → сообщение покупателю ──
+MAX_WEIGHT_KG = 50.0
+_WEIGHT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(кг|килограмм\w*|kg|г|гр|грамм\w*|g)?")
+
+
+def order_has_weight(o: OrderView) -> bool:
+    """В заказе есть весовые позиции — значит, его нужно взвешивать."""
+    return has_weight_items(unit for *_, unit in o.items)
+
+
+def weight_indexes(o: OrderView) -> list[int]:
+    """Номера весовых позиций заказа (с нуля)."""
+    return [i for i, (_n, _q, _p, unit) in enumerate(o.items) if unit in {"кг", "г"}]
+
+
+def parse_weight(text: str, unit: str = "кг") -> float | None:
+    """Вес, который написал менеджер: «0,95», «0.95 кг», «950 г», «950» → число в единицах товара.
+
+    Без единиц: меньше 10 — килограммы, 10 и больше — граммы (на весах обычно пишут «950»).
+    None — не удалось разобрать. 0 допустим: позиции нет, её уберём из итога."""
+    m = _WEIGHT_RE.fullmatch(text.strip().lower().replace(",", "."))
+    if not m:
+        return None
+    value, suffix = float(m.group(1)), m.group(2) or ""
+    grams = bool(suffix) and suffix[0] in "гg"
+    kilos = value / 1000 if grams or (not suffix and value >= 10) else value
+    if kilos > MAX_WEIGHT_KG:
+        return None
+    kilos = round(kilos, 3)
+    return round(kilos * 1000, 3) if unit == "г" else kilos
+
+
+def apply_weights(items: list[tuple[str, float, float, str]],
+                  weights: dict[int, float]) -> list[tuple[str, float, float, str]]:
+    """Позиции заказа с фактическим весом: {номер позиции: вес}. Позиции с весом 0 убираются."""
+    result = []
+    for i, (name, qty, price, unit) in enumerate(items):
+        actual = weights.get(i, qty)
+        if actual > 0:
+            result.append((name, actual, price, unit))
+    return result
+
+
+def items_total(items: list[tuple[str, float, float, str]]) -> float:
+    return sum(qty * price for _name, qty, price, _unit in items)
+
+
+def _final_total(o: OrderView) -> float:
+    return o.final_total if o.final_total is not None else items_total(o.final_items or o.items)
+
+
+def format_weighing(o: OrderView, final_items: list[tuple[str, float, float, str]], currency: str) -> str:
+    """Что увидит менеджер перед отправкой итога покупателю."""
+    rows = [f"⚖️ <b>Заказ №{o.id} — итог по факту</b>", ""]
+    for name, qty, price, unit in final_items:
+        rows.append(f"• {escape(name)} — {fmt_qty(qty)} {escape(unit)} × {money(price, currency)} "
+                    f"= <b>{money(qty * price, currency)}</b>")
+    removed = [name for name, *_ in o.items if name not in {n for n, *_ in final_items}]
+    for name in removed:
+        rows.append(f"• {escape(name)} — убрано из заказа")
+    rows += ["", f"Итого: <b>{money(items_total(final_items), currency)}</b> "
+                 f"(по заказу было ≈ {money(o.total, currency)})"]
+    return "\n".join(rows)
+
+
+def format_final_message(o: OrderView, currency: str, payment: str = "") -> str:
+    """Сообщение покупателю после взвешивания: фактический вес, итог, реквизиты."""
+    items = o.final_items if o.final_items is not None else o.items
+    total = _final_total(o)
+    rows = [f"⚖️ <b>Заказ №{o.id} взвешен!</b>", ""]
+    for name, qty, price, unit in items:
+        rows.append(f"• {escape(name)} — {fmt_qty(qty)} {escape(unit)} × {money(price, currency)} "
+                    f"= <b>{money(qty * price, currency)}</b>")
+    rows += ["", f"Итого к оплате: <b>{money(total, currency)}</b>"]
+    if abs(total - o.total) >= 0.5:
+        rows.append(f"<i>(при заказе было ≈ {money(o.total, currency)})</i>")
+    if payment.strip():
+        rows += ["", "💳 <b>Реквизиты для оплаты</b>", escape(payment.strip())]
+    else:
+        rows += ["", "💳 Реквизиты для оплаты пришлёт менеджер."]
+    return "\n".join(rows)
+
+
+# ── «Повторить заказ» ──
+def _norm_name(name: str) -> str:
+    return " ".join(name.casefold().replace("ё", "е").split())
+
+
+def match_repeat(items: list[tuple[str, float, float, str]],
+                 catalog: Catalog) -> tuple[list[tuple[Product, float]], list[str]]:
+    """Позиции прошлого заказа → товары каталога (по названию).
+    Второй список — названия, которых больше нет в каталоге или они сейчас недоступны."""
+    by_name = {_norm_name(p.name): p for p in catalog.products}
+    found, missing = [], []
+    for name, qty, _price, _unit in items:
+        product = by_name.get(_norm_name(name))
+        if product and product.available and qty > 0:
+            found.append((product, qty))
+        else:
+            missing.append(name)
+    return found, missing

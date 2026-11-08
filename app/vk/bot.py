@@ -19,8 +19,8 @@ from app.context import AppContext
 from app.core import birthdays as bd
 from app.core.faq_bot import FaqBot, Reply
 from app.core.knowledge import HANDOFF_FALLBACK, format_handoff, split_handoff
-from app.core.orders import STATUSES, catalog_intro, checkout_comment_hint, fmt_qty, format_cart, \
-    format_order, format_product
+from app.core.orders import STATUSES, OrderView, apply_weights, catalog_intro, checkout_comment_hint, fmt_qty, \
+    format_cart, format_order, format_product, format_weighing, money, order_has_weight, parse_weight, weight_indexes
 from app.services import weather_reports
 from app.services.llm import LLMError
 from app.vk import keyboards as kb
@@ -40,6 +40,7 @@ PHRASES = {
     "catalog": {"catalog", "каталог", "заказ", "order", "заказать", "сделать заказ"},
     "cart": {"cart", "корзина"},
     "myorders": {"myorders", "мои заказы"},
+    "repeat": {"repeat", "повторить заказ", "повторить", "повторить последний заказ", "заказать снова", "заказать то же"},
     "mybd_help": {"мой день рождения", "мой др"},
     "birthdays": {"birthdays", "bd", "дни рождения", "ближайшие дни рождения"},
     "id": {"id"},
@@ -47,7 +48,7 @@ PHRASES = {
     "manager": {"менеджер", "связаться с менеджером", "позвать менеджера", "оператор", "живой человек"},
 }
 ARG_COMMANDS = {"mybd": "mybd", "др": "mybd", "bd_add": "bd_add", "bd_del": "bd_del"}
-CHECKOUT_BUTTONS = {"no_comment", "use_name", "use_phone", "skip_bd", "no_phone"}
+CHECKOUT_BUTTONS = {"no_comment", "use_name", "use_phone", "skip_bd", "no_phone", "w_same"}
 HANDOFF_DAILY_CAP = 5   # сколько раз в сутки один человек может передать вопрос менеджеру
 ADMIN_COMMANDS = {"test_morning", "test_evening", "test_bd", "bd_list", "bd_sync", "bd_add", "bd_del"}
 
@@ -357,7 +358,7 @@ class VkBot:
         elif cmd == "catalog" and chat:
             await self.send_catalog_photo(peer_id)
             await self.send(peer_id, "Нажмите кнопку — пришлю каталог вам в личные сообщения 👇", kb.chat_catalog())
-        elif cmd in {"cart", "myorders"} and chat:
+        elif cmd in {"cart", "myorders", "repeat"} and chat:
             await self.send(peer_id, "Заказы оформляются в личных сообщениях сообщества 👇", kb.chat_catalog())
         elif cmd == "catalog":
             await self.show_catalog(user_id)
@@ -367,7 +368,9 @@ class VkBot:
             orders = await self.ctx.db.orders_of(PLATFORM, user_id)
             text = ("\n\n".join(format_order(o, self.ctx.catalog.currency) for o in orders)
                     if orders else "Заказов пока нет. Загляните в каталог 🛍")
-            await self.send(user_id, text)
+            await self.send(user_id, text, kb.repeat_orders([o.id for o in orders]))
+        elif cmd == "repeat":
+            await self.repeat_order(user_id)
         elif cmd == "mybd_help":
             await self.cmd_mybd_help(peer_id, user_id)
         elif cmd == "mybd":
@@ -452,7 +455,8 @@ class VkBot:
             await self.send(peer_id, "Открытых заказов нет 👌")
             return
         for o in orders:
-            await self.send(peer_id, await self.ctx.messenger.manager_text(o), kb.order_status(o.id))
+            await self.send(peer_id, await self.ctx.messenger.manager_text(o),
+                            kb.order_status(o.id, weigh=order_has_weight(o)))
 
     async def admin_command(self, cmd: str, arg: str, peer_id: int, reply: dict) -> None:
         ctx = self.ctx
@@ -730,6 +734,16 @@ class VkBot:
             self.checkout.pop(user_id, None)
             self.handoff_q.pop(user_id, None)
             await self.send(user_id, "Хорошо, не передаю. Если что — я на связи 🙂", kb.main_menu())
+        elif action == "repeat":
+            snackbar = await self.repeat_order(user_id, self._int(payload.get("o")))
+        elif action == "wstart":
+            snackbar = await self.weigh_start(user_id, self._int(payload.get("o")))
+        elif action == "w_send":
+            snackbar = await self.weigh_send(user_id)
+        elif action == "w_cancel":
+            if str(self.checkout.get(user_id, {}).get("step", "")).startswith("w_"):
+                self.checkout.pop(user_id, None)
+            snackbar = "Взвешивание отменено"
         try:
             await self.api.answer_event(event_id, user_id, peer_id, snackbar, link=link)
         except VkApiError as exc:
@@ -755,6 +769,9 @@ class VkBot:
         cmd = (payload or {}).get("cmd")
         text = text.strip()
         step = state["step"]
+        if step.startswith("w_"):   # менеджер вводит фактический вес
+            await self.weigh_input(user_id, text, cmd)
+            return
         if text.lower() in {"отмена", "отменить", "/cancel"}:
             self.checkout.pop(user_id, None)
             if step.startswith("h_"):
@@ -874,9 +891,127 @@ class VkBot:
         if not order:
             return "Заказ не найден"
         await self.edit_or_send(peer_id, cmid, await self.ctx.messenger.manager_text(order),
-                                kb.order_status(order.id))
+                                kb.order_status(order.id, weigh=order_has_weight(order)))
         await self.ctx.messenger.notify_customer(order)
         return f"Статус: {STATUSES[status]}"
+
+    @staticmethod
+    def _int(value) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    # ── «Повторить заказ» ─────────────────────────────────────
+    async def repeat_order(self, user_id: int, order_id: int | None = None) -> str | None:
+        """Кладёт позиции прошлого заказа в корзину и показывает её. order_id пустой — берём последний заказ.
+        Возвращает короткую подсказку для кнопки."""
+        if order_id:
+            order = await self.ctx.db.order(order_id)
+            if not order or order.platform != PLATFORM or order.user_id != user_id:   # только свои заказы
+                return "Заказ не найден"
+        else:
+            last = await self.ctx.db.orders_of(PLATFORM, user_id, limit=1)
+            if not last:
+                await self.send(user_id, "Заказов пока нет — загляните в каталог 🛍", kb.main_menu())
+                return None
+            order = last[0]
+        added, missing, prices_changed = await self.ctx.orders.repeat(PLATFORM, user_id, order)
+        if not added:
+            await self.send(user_id, f"К сожалению, ни одной позиции из заказа №{order.id} сейчас нет в каталоге 😔 "
+                                     "Загляните в каталог — там много вкусного 🛍", kb.main_menu())
+            return None
+        rows = [f"🔁 Добавил в корзину позиции из заказа №{order.id}:"]
+        rows += [f"• {escape(name)} — {fmt_qty(qty)} {escape(unit)}" for name, qty, unit in added]
+        if missing:
+            rows += ["", "⚠️ Не добавил (нет в каталоге или временно недоступно): "
+                         + ", ".join(escape(name) for name in missing)]
+        if prices_changed:
+            rows += ["", "ℹ️ Цены — по актуальному каталогу."]
+        await self.send(user_id, "\n".join(rows))
+        await self.show_cart(user_id, None)
+        return "Добавил в корзину 🛒"
+
+    # ── взвешивание заказа: менеджер вводит фактический вес → итог → покупателю ──
+    async def weigh_start(self, user_id: int, order_id: int) -> str | None:
+        if not await self.is_manager(user_id):
+            return "Только для менеджеров"
+        order = await self.ctx.db.order(order_id)
+        if not order:
+            return "Заказ не найден"
+        if order.status == "cancelled":
+            return "Заказ отменён"
+        todo = weight_indexes(order)
+        if not todo:
+            return "В заказе нет весовых товаров"
+        self.checkout[user_id] = {"step": "w_item", "order": order.id, "todo": todo, "pos": 0, "weights": {}}
+        await self.weigh_ask(user_id, order)
+        return None
+
+    async def weigh_ask(self, user_id: int, order: OrderView) -> None:
+        state = self.checkout[user_id]
+        name, qty, price, unit = order.items[state["todo"][state["pos"]]]
+        cur = self.ctx.catalog.currency
+        text = (f"⚖️ <b>Заказ №{order.id}</b> · позиция {state['pos'] + 1} из {len(state['todo'])}\n\n"
+                f"{escape(name)}\nЗаказано: ≈ {fmt_qty(qty)} {escape(unit)} · {money(price, cur)}/{escape(unit)}\n\n"
+                "Напишите фактический вес: например 0,95 или 950 г. Если позиции нет — напишите 0.")
+        await self.send(user_id, text, kb.weigh_item(f"✅ Как заказано: {fmt_qty(qty)} {unit}"))
+
+    async def weigh_input(self, user_id: int, text: str, cmd: str | None) -> None:
+        state = self.checkout[user_id]
+        if text.lower() in {"отмена", "отменить", "/cancel"}:
+            self.checkout.pop(user_id, None)
+            await self.send(user_id, "Взвешивание отменено.", kb.main_menu())
+            return
+        order = await self.ctx.db.order(state["order"])
+        if not order:
+            self.checkout.pop(user_id, None)
+            await self.send(user_id, "Заказ не найден.", kb.main_menu())
+            return
+        if state["step"] == "w_confirm":
+            await self.send(user_id, "Нажмите «✅ Отправить клиенту», «↩️ Заново» или «❌ Отмена» под итогом.",
+                            kb.weigh_confirm(order.id))
+            return
+        i = state["todo"][state["pos"]]
+        _name, qty, _price, unit = order.items[i]
+        weight = qty if cmd == "w_same" else parse_weight(text, unit)
+        if weight is None:
+            await self.send(user_id, "Не понял вес 🤔 Напишите число: 0,95 или 950 г. Если позиции нет — 0.",
+                            kb.weigh_item(f"✅ Как заказано: {fmt_qty(qty)} {unit}"))
+            return
+        state["weights"][i] = weight
+        state["pos"] += 1
+        if state["pos"] < len(state["todo"]):
+            await self.weigh_ask(user_id, order)
+            return
+        final = apply_weights(order.items, state["weights"])
+        if not final:
+            self.checkout.pop(user_id, None)
+            await self.send(user_id, "В заказе не осталось ни одной позиции. Если заказ не нужен — "
+                                     "отметьте его «❌ Отменён».", kb.main_menu())
+            return
+        state["step"] = "w_confirm"
+        await self.send(user_id, format_weighing(order, final, self.ctx.catalog.currency) + "\n\nОтправить итог покупателю?",
+                        kb.weigh_confirm(order.id))
+
+    async def weigh_send(self, user_id: int) -> str | None:
+        if not await self.is_manager(user_id):
+            return "Только для менеджеров"
+        state = self.checkout.get(user_id)
+        if not state or state.get("step") != "w_confirm":
+            return "Нет взвешивания в работе"
+        self.checkout.pop(user_id, None)
+        order = await self.ctx.db.order(state["order"])
+        if not order:
+            return "Заказ не найден"
+        order = await self.ctx.orders.set_final(order.id, apply_weights(order.items, state["weights"]))
+        delivered = await self.ctx.messenger.notify_final(order)
+        note = ("✅ Итог и реквизиты отправлены покупателю." if delivered else
+                "⚠️ Итог сохранён, но покупателю отправить не получилось (возможно, у него закрыты сообщения). "
+                "Свяжитесь с ним сами.")
+        await self.send(user_id, note + "\n\n" + await self.ctx.messenger.manager_text(order),
+                        kb.order_status(order.id, weigh=order_has_weight(order)))
+        return "Итог отправлен" if delivered else "Не доставлено покупателю"
 
     # ── заказ через раздел «Товары» ВКонтакте ─────────────────
     async def on_market_order(self, obj: dict) -> None:

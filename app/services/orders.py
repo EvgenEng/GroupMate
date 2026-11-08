@@ -1,7 +1,7 @@
 """Логика заказов, общая для Telegram и ВКонтакте: корзина, оформление, статусы."""
 from __future__ import annotations
 
-from app.core.orders import Catalog, CartLine, OrderView, build_lines, cart_total
+from app.core.orders import Catalog, CartLine, OrderView, build_lines, cart_total, items_total, match_repeat
 from app.services.db import Database
 
 MAX_QTY = {"кг": 20, "г": 5000}  # разумный предел на одну позицию
@@ -38,6 +38,34 @@ class OrderService:
         order_id = await self.db.create_order(platform, user_id, name, username, phone, comment,
                                               items, cart_total(lines))
         await self.db.cart_clear(platform, user_id)
+        return await self.db.order(order_id)
+
+    async def repeat(self, platform: str, user_id: int,
+                     order: OrderView) -> tuple[list[tuple[str, float, str]], list[str], bool]:
+        """«Повторить заказ»: кладёт позиции прошлого заказа в корзину по текущему каталогу.
+
+        Если позиция уже в корзине, берётся большее количество (а не сумма) — двойное нажатие ничего не ломает.
+        Возвращает: что добавлено [(название, количество, единица)], чего нет в каталоге, изменились ли цены."""
+        found, missing = match_repeat(order.items, self.catalog)
+        cart = await self.db.cart(platform, user_id)
+        added, prices_changed = [], False
+        old_prices = {name: price for name, _q, price, _u in order.items}
+        for product, qty in found:
+            qty = min(qty, MAX_QTY.get(product.unit, 99))
+            missing_qty = qty - cart.get(product.id, 0.0)
+            if missing_qty > 1e-9:
+                await self.db.cart_change(platform, user_id, product.id, missing_qty,
+                                          max_qty=MAX_QTY.get(product.unit, 99))
+            added.append((product.name, qty, product.unit))
+            if abs(old_prices.get(product.name, product.price) - product.price) >= 0.5:
+                prices_changed = True
+        return added, missing, prices_changed
+
+    async def set_final(self, order_id: int, final_items: list[tuple[str, float, float, str]]) -> OrderView | None:
+        """Сохраняет итог после взвешивания и возвращает обновлённый заказ."""
+        if not await self.db.order(order_id):
+            return None
+        await self.db.set_order_final(order_id, final_items, items_total(final_items))
         return await self.db.order(order_id)
 
     async def set_status(self, order_id: int, status: str) -> OrderView | None:

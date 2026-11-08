@@ -690,3 +690,206 @@ class VkSubscriberWelcomeTests(VkTestCase):
         self.run_all(self.join(CUSTOMER))
         self.assertEqual(self.api.texts_to(CUSTOMER), [])
         self.assertIsNone(self.state(CUSTOMER))
+
+
+class VkRepeatAndWeighingTests(VkTestCase):
+    """«Повторить заказ» у покупателя и взвешивание заказа менеджером (итог + реквизиты)."""
+
+    ITEMS = [("Шейка классическая в/к", 1.5, 1700.0, "кг"), ("Набор «Знакомство с GASTRODOM»", 1.0, 2490.0, "шт")]
+    PAYMENT = "Сбербанк: 2202 0000 0000 0000\nПолучатель: Иванов И. И."
+
+    def make_order(self, user=CUSTOMER, items=None, status="new"):
+        items = items or self.ITEMS
+        total = sum(qty * price for _n, qty, price, _u in items)
+        oid = asyncio.run(self.ctx.db.create_order("vk", user, "Смирнова Ольга", "olga", "+7 999 123-45-67",
+                                                   "", items, total))
+        if status != "new":
+            asyncio.run(self.ctx.db.set_order_status(oid, status))
+        return oid
+
+    def cart(self, user=CUSTOMER):
+        return asyncio.run(self.ctx.db.cart("vk", user))
+
+    def boards(self, peer):
+        return json.dumps([k for p, _t, k in self.api.sent if p == peer and k], ensure_ascii=False)
+
+    # ── повторить заказ ──────────────────────────────────────
+    def test_repeat_button_fills_cart_and_double_tap_does_not_double(self):
+        oid = self.make_order()
+        self.run_all(event(CUSTOMER, {"a": "repeat", "o": oid}))
+        self.assertEqual(self.cart(), {"neck": 1.5, "set-intro": 1.0})
+        texts = self.api.texts_to(CUSTOMER)
+        self.assertTrue(any(t.startswith(f"🔁 Добавил в корзину позиции из заказа №{oid}") for t in texts))
+        self.assertTrue(any(t.startswith("🛒 Ваша корзина") for t in texts))
+        self.assertEqual(self.api.snackbars[-1], "Добавил в корзину 🛒")
+        self.run_all(event(CUSTOMER, {"a": "repeat", "o": oid}))
+        self.assertEqual(self.cart(), {"neck": 1.5, "set-intro": 1.0})   # количество не удвоилось
+
+    def test_repeat_keeps_bigger_quantity_already_in_cart(self):
+        oid = self.make_order()
+        asyncio.run(self.ctx.db.cart_change("vk", CUSTOMER, "neck", 3.0))
+        asyncio.run(self.ctx.db.cart_change("vk", CUSTOMER, "ribs", 1.0))
+        self.run_all(event(CUSTOMER, {"a": "repeat", "o": oid}))
+        self.assertEqual(self.cart(), {"neck": 3.0, "ribs": 1.0, "set-intro": 1.0})   # чужое в корзине не тронуто
+
+    def test_repeat_works_only_for_own_orders(self):
+        oid = self.make_order(CUSTOMER)
+        self.run_all(event(STRANGER, {"a": "repeat", "o": oid}), event(STRANGER, {"a": "repeat", "o": 999}))
+        self.assertEqual(self.api.snackbars[-2:], ["Заказ не найден", "Заказ не найден"])
+        self.assertEqual(self.cart(STRANGER), {})
+
+    def test_repeat_reports_missing_positions_and_changed_prices(self):
+        items = self.ITEMS + [("Позиция, которой больше нет", 1.0, 100.0, "шт")]
+        items[0] = ("Шейка классическая в/к", 1.5, 1500.0, "кг")   # тогда цена была другой
+        oid = self.make_order(items=items)
+        self.run_all(event(CUSTOMER, {"a": "repeat", "o": oid}))
+        report = [t for t in self.api.texts_to(CUSTOMER) if t.startswith("🔁")][0]
+        self.assertIn("⚠️ Не добавил", report)
+        self.assertIn("Позиция, которой больше нет", report)
+        self.assertIn("Цены — по актуальному каталогу", report)
+        self.assertEqual(self.cart(), {"neck": 1.5, "set-intro": 1.0})
+
+    def test_repeat_when_nothing_is_available(self):
+        oid = self.make_order(items=[("Позиция, которой больше нет", 1.0, 100.0, "шт")])
+        self.run_all(event(CUSTOMER, {"a": "repeat", "o": oid}))
+        self.assertTrue(any("ни одной позиции" in t for t in self.api.texts_to(CUSTOMER)))
+        self.assertEqual(self.cart(), {})
+
+    def test_repeat_by_text_and_menu_button_uses_last_order(self):
+        self.run_all(message(CUSTOMER, CUSTOMER, "повторить заказ"))
+        self.assertTrue(any("Заказов пока нет" in t for t in self.api.texts_to(CUSTOMER)))
+        self.make_order(items=[("Рулет «4 мяса»", 1.0, 1800.0, "кг")])
+        self.make_order()
+        self.run_all(message(CUSTOMER, CUSTOMER, "🔁 Повторить заказ", {"cmd": "repeat"}))
+        self.assertEqual(self.cart(), {"neck": 1.5, "set-intro": 1.0})   # последний заказ — №2
+        self.assertIn("🔁 Повторить заказ", json.dumps(kb.main_menu(), ensure_ascii=False))
+        self.run_all(message(CHAT, CUSTOMER, "повторить заказ"))
+        self.assertTrue(any("личных сообщениях" in t for t in self.api.texts_to(CHAT)))   # в беседе — отправляем в личку
+
+    def test_my_orders_have_repeat_buttons_and_done_status_offers_repeat(self):
+        oid = self.make_order()
+        self.run_all(message(CUSTOMER, CUSTOMER, "мои заказы"))
+        self.assertIn(f'"a":"repeat","o":{oid}', self.boards(CUSTOMER).replace(" ", "").replace("\\", ""))
+        self.run_all(event(MANAGER, {"a": "ost", "o": oid, "s": "done"}))
+        done = [(t, k) for p, t, k in self.api.sent if p == CUSTOMER and "выполнен" in t]
+        self.assertEqual(len(done), 1)
+        self.assertIn("repeat", json.dumps(done[0][1]))
+        self.run_all(event(MANAGER, {"a": "ost", "o": oid, "s": "ready"}))
+        ready = [k for p, t, k in self.api.sent if p == CUSTOMER and "готов" in t]
+        self.assertEqual(ready, [None])    # у остальных статусов кнопки нет
+
+    # ── взвешивание ──────────────────────────────────────────
+    def start_weighing(self, items=None):
+        oid = self.make_order(items=items)
+        self.run_all(event(MANAGER, {"a": "wstart", "o": oid}))
+        return oid
+
+    def test_manager_weighs_order_and_customer_gets_total_and_payment(self):
+        self.ctx.settings.__dict__["payment_details"] = self.PAYMENT
+        oid = self.make_order()
+        asyncio.run(self.ctx.messenger.notify_new_order(asyncio.run(self.ctx.db.order(oid))))
+        self.assertIn("wstart", self.boards(MANAGER))                       # кнопка «Ввести вес» под заказом
+        self.run_all(event(MANAGER, {"a": "wstart", "o": oid}))
+        ask = self.api.texts_to(MANAGER)[-1]
+        self.assertIn("Шейка классическая в/к", ask)
+        self.assertIn("позиция 1 из 1", ask)
+        self.run_all(message(MANAGER, MANAGER, "1,35"))
+        summary = self.api.texts_to(MANAGER)[-1]
+        self.assertIn("Итого: 4 785 ₽", summary)
+        self.assertIn("по заказу было ≈ 5 040 ₽", summary)
+        self.assertEqual(self.bot.checkout[MANAGER]["step"], "w_confirm")
+        self.run_all(event(MANAGER, {"a": "w_send"}))
+        self.assertNotIn(MANAGER, self.bot.checkout)
+        final = [t for t in self.api.texts_to(CUSTOMER) if "взвешен" in t][0]
+        self.assertIn("Шейка классическая в/к — 1,35 кг × 1 700 ₽ = 2 295 ₽", final)
+        self.assertIn("Итого к оплате: 4 785 ₽", final)
+        self.assertIn("Сбербанк: 2202 0000 0000 0000\nПолучатель: Иванов И. И.", final)
+        order = asyncio.run(self.ctx.db.order(oid))
+        self.assertEqual((order.final_total, order.total), (4785.0, 5040.0))
+        self.assertTrue(any("Итог и реквизиты отправлены" in t for t in self.api.texts_to(MANAGER)))
+        self.assertEqual(self.api.snackbars[-1], "Итог отправлен")
+        # покупатель в «Мои заказы» видит уже итог по факту; менеджер — пометку «по факту»
+        self.run_all(message(CUSTOMER, CUSTOMER, "мои заказы"))
+        self.assertIn("⚖️ Взвешено. Итого к оплате: 4 785 ₽", self.api.texts_to(CUSTOMER)[-1])
+        self.assertIn("по факту", self.api.texts_to(MANAGER)[-1])
+
+    def test_weighing_variants_same_grams_invalid_and_zero(self):
+        items = [("Шейка классическая в/к", 1.5, 1700.0, "кг"), ("Карбонад классический в/к", 1.0, 1500.0, "кг"),
+                 ("Грудинка в/к", 0.5, 1000.0, "кг"), ("Набор «Мясной стол»", 1.0, 3490.0, "шт")]
+        oid = self.start_weighing(items)
+        self.assertIn("позиция 1 из 3", self.api.texts_to(MANAGER)[-1])     # наборы не взвешиваем
+        self.run_all(message(MANAGER, MANAGER, "много"))                      # не число — переспросим
+        self.assertTrue(self.api.texts_to(MANAGER)[-1].startswith("Не понял вес"))
+        self.run_all(message(MANAGER, MANAGER, "✅ Как заказано: 1,5 кг", {"cmd": "w_same"}))   # как заказано
+        self.run_all(message(MANAGER, MANAGER, "950 г"))                       # граммы
+        self.run_all(message(MANAGER, MANAGER, "0"))                           # позиции нет — убираем
+        summary = self.api.texts_to(MANAGER)[-1]
+        self.assertIn("Грудинка в/к — убрано из заказа", summary)
+        self.assertIn("Итого: 7 465 ₽", summary)                              # 1,5·1700 + 0,95·1500 + 3490
+        self.assertIn("по заказу было ≈ 8 040 ₽", summary)
+        self.run_all(event(MANAGER, {"a": "w_send"}))
+        order = asyncio.run(self.ctx.db.order(oid))
+        self.assertEqual([name for name, *_ in order.final_items],
+                         ["Шейка классическая в/к", "Карбонад классический в/к", "Набор «Мясной стол»"])
+
+    def test_weighing_all_positions_removed_aborts(self):
+        self.start_weighing([("Шейка классическая в/к", 1.5, 1700.0, "кг")])
+        self.run_all(message(MANAGER, MANAGER, "0"))
+        self.assertTrue(any("не осталось ни одной позиции" in t for t in self.api.texts_to(MANAGER)))
+        self.assertNotIn(MANAGER, self.bot.checkout)
+
+    def test_only_managers_weigh_and_send(self):
+        oid = self.make_order()
+        self.run_all(event(CUSTOMER, {"a": "wstart", "o": oid}), event(STRANGER, {"a": "w_send"}))
+        self.assertEqual(self.api.snackbars[-2:], ["Только для менеджеров", "Только для менеджеров"])
+        self.assertNotIn(CUSTOMER, self.bot.checkout)
+        self.run_all(event(MANAGER, {"a": "w_send"}))
+        self.assertEqual(self.api.snackbars[-1], "Нет взвешивания в работе")
+        self.assertEqual(asyncio.run(self.ctx.db.order(oid)).final_items, None)
+
+    def test_weighing_cancel_and_unsuitable_orders(self):
+        self.start_weighing()
+        self.run_all(event(MANAGER, {"a": "w_cancel"}))
+        self.assertNotIn(MANAGER, self.bot.checkout)
+        self.assertEqual(self.api.snackbars[-1], "Взвешивание отменено")
+        self.start_weighing()
+        self.run_all(message(MANAGER, MANAGER, "отмена"))
+        self.assertNotIn(MANAGER, self.bot.checkout)
+        sets = self.make_order(items=[("Набор «Мясной стол»", 1.0, 3490.0, "шт")])
+        cancelled = self.make_order(status="cancelled")
+        self.run_all(event(MANAGER, {"a": "wstart", "o": sets}), event(MANAGER, {"a": "wstart", "o": cancelled}),
+                     event(MANAGER, {"a": "wstart", "o": 999}))
+        self.assertEqual(self.api.snackbars[-3:], ["В заказе нет весовых товаров", "Заказ отменён", "Заказ не найден"])
+
+    def test_no_payment_details_and_undelivered_final(self):
+        oid = self.start_weighing()
+        self.run_all(message(MANAGER, MANAGER, "1,5"), event(MANAGER, {"a": "w_send"}))
+        final = [t for t in self.api.texts_to(CUSTOMER) if "взвешен" in t][0]
+        self.assertIn("Реквизиты для оплаты пришлёт менеджер", final)     # PAYMENT_DETAILS не задан
+        # покупатель закрыл сообщения: итог сохраняем, менеджеру говорим об этом
+        real_send = self.api.send
+
+        async def refuse(peer_id, text, keyboard=None, **extra):
+            if peer_id == CUSTOMER:
+                raise RuntimeError("Can't send messages for users without permission")
+            await real_send(peer_id, text, keyboard, **extra)
+
+        self.api.send = refuse
+        self.run_all(event(MANAGER, {"a": "wstart", "o": oid}), message(MANAGER, MANAGER, "1,4"),
+                     event(MANAGER, {"a": "w_send"}))
+        self.assertTrue(any("покупателю отправить не получилось" in t for t in self.api.texts_to(MANAGER)))
+        self.assertEqual(self.api.snackbars[-1], "Не доставлено покупателю")
+        self.assertEqual(asyncio.run(self.ctx.db.order(oid)).final_total, 1.4 * 1700 + 2490)
+
+    def test_new_keyboards_fit_vk_limits(self):
+        boards = [kb.order_status(1, weigh=True), kb.weigh_item("✅ Как заказано: 1,5 кг"), kb.weigh_confirm(1),
+                  kb.repeat_button(1), kb.repeat_orders(list(range(100, 112)))]
+        for board in boards:
+            rows, buttons = kb.count_buttons(board)
+            self.assertLessEqual(rows, kb.INLINE_MAX_ROWS)
+            self.assertLessEqual(buttons, kb.INLINE_MAX_BUTTONS)
+            for row in board["buttons"]:
+                for b in row:
+                    self.assertLessEqual(len(b["action"]["label"]), kb.LABEL_MAX)
+                    self.assertLessEqual(len(b["action"].get("payload", "")), 255)
+        self.assertIsNone(kb.repeat_orders([]))

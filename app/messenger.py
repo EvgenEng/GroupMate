@@ -11,7 +11,8 @@ import logging
 
 from app.config import Settings
 from app.core.birthdays import order_on_birthday
-from app.core.orders import Catalog, OrderView, STATUS_FOR_CUSTOMER, format_manager_order
+from app.core.orders import (Catalog, OrderView, STATUS_FOR_CUSTOMER, format_final_message, format_manager_order,
+                             order_has_weight)
 from app.services.db import Database
 from app.vk import keyboards as vk_kb
 from app.vk.format import html_to_vk
@@ -141,15 +142,25 @@ class Messenger:
             for uid in await self.tg_manager_ids():
                 delivered += await self._tg_send(uid, text, tg_kb.owner_order_kb(order.id))
         for uid in await self.vk_manager_ids():
-            delivered += await self._vk_send(uid, text, vk_kb.order_status(order.id))
+            delivered += await self._vk_send(uid, text, vk_kb.order_status(order.id, weigh=order_has_weight(order)))
         if not delivered:
             logger.error("Заказ №%s: ни одному менеджеру не удалось отправить уведомление!", order.id)
         return delivered
 
     async def notify_customer(self, order: OrderView) -> None:
         note = STATUS_FOR_CUSTOMER.get(order.status)
-        if note:
-            await self.to_user(order.platform, order.user_id, note.format(id=order.id))
+        if not note:
+            return
+        text = note.format(id=order.id)
+        if order.platform == "vk" and order.status == "done":   # заказ выполнен — сразу предлагаем повторить
+            await self._vk_send(order.user_id, text, vk_kb.repeat_button(order.id))
+            return
+        await self.to_user(order.platform, order.user_id, text)
+
+    async def notify_final(self, order: OrderView) -> bool:
+        """Итог после взвешивания и реквизиты — покупателю. False — не дошло (например, закрыты сообщения)."""
+        text = format_final_message(order, self.catalog.currency, self.settings.payment_details)
+        return await self.to_user(order.platform, order.user_id, text)
 
     async def notify_handoff(self, html: str) -> int:
         """Вопрос покупателя, на который бот не смог ответить: всем менеджерам. Возвращает, скольким дошло."""

@@ -345,3 +345,95 @@ class ConfigAndMiscTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WeighingAndRepeatCoreTests(unittest.TestCase):
+    """Взвешивание заказа (итог по факту) и подбор позиций для «Повторить заказ»."""
+
+    def setUp(self):
+        self.catalog = od.Catalog.load(ROOT / "config" / "catalog.json")
+        self.items = [("Шейка классическая в/к", 1.5, 1700.0, "кг"),
+                      ("Набор «Знакомство с GASTRODOM»", 1.0, 2490.0, "шт"),
+                      ("Карбонад классический в/к", 1.0, 1500.0, "кг")]
+        self.order = od.OrderView(5, "Ольга", None, 100, "+7999", "", self.items, 1700 * 1.5 + 2490 + 1500,
+                                  "accepted", "07.11.2026 10:00", "vk")
+
+    def test_parse_weight(self):
+        cases = {"0,95": 0.95, "0.95 кг": 0.95, "950 г": 0.95, "950": 0.95, "1": 1.0, "1,5кг": 1.5,
+                 "1.2 КГ": 1.2, "950гр": 0.95, "0": 0.0, "  2  ": 2.0}
+        for text, expected in cases.items():
+            self.assertEqual(od.parse_weight(text), expected, text)
+        for bad in ("", "abc", "60 кг", "1,2,3", "-1", "кг"):
+            self.assertIsNone(od.parse_weight(bad), bad)
+        self.assertEqual(od.parse_weight("0,95", "г"), 950.0)   # если товар считается в граммах
+
+    def test_weight_indexes_and_has_weight(self):
+        self.assertEqual(od.weight_indexes(self.order), [0, 2])
+        self.assertTrue(od.order_has_weight(self.order))
+        sets_only = od.OrderView(6, "", None, 1, "", "", [("Набор", 1.0, 2490.0, "шт")], 2490, "new", "", "vk")
+        self.assertFalse(od.order_has_weight(sets_only))
+
+    def test_apply_weights_and_total(self):
+        final = od.apply_weights(self.items, {0: 1.35, 2: 0.0})   # шейка полегче, карбоната не нашлось
+        self.assertEqual([n for n, *_ in final], ["Шейка классическая в/к", "Набор «Знакомство с GASTRODOM»"])
+        self.assertAlmostEqual(od.items_total(final), 1700 * 1.35 + 2490)
+        self.assertEqual(od.apply_weights(self.items, {})[0][1], 1.5)   # без правок — как заказано
+
+    def test_final_texts(self):
+        final = od.apply_weights(self.items, {0: 1.35, 2: 0.0})
+        preview = od.format_weighing(self.order, final, "₽")
+        self.assertIn("Шейка классическая в/к — 1,35 кг × 1 700 ₽ = <b>2 295 ₽</b>", preview)
+        self.assertIn("Карбонад классический в/к — убрано из заказа", preview)
+        self.assertIn("Итого: <b>4 785 ₽</b>", preview)
+        self.order.final_items, self.order.final_total = final, od.items_total(final)
+        message = od.format_final_message(self.order, "₽", "Карта 1234\nПолучатель: И. Иванов")
+        self.assertIn("Итого к оплате: <b>4 785 ₽</b>", message)
+        self.assertIn("при заказе было ≈ 6 540 ₽", message)
+        self.assertIn("Карта 1234\nПолучатель: И. Иванов", message)
+        self.assertIn("пришлёт менеджер", od.format_final_message(self.order, "₽", ""))
+        # покупатель и менеджер видят уже фактический вес
+        self.assertIn("⚖️ Взвешено. Итого к оплате: <b>4 785 ₽</b>", od.format_order(self.order, "₽"))
+        self.assertIn("по факту", od.format_manager_order(self.order, "₽"))
+        self.assertNotIn("Карбонад", od.format_manager_order(self.order, "₽"))
+
+    def test_match_repeat(self):
+        items = [("шейка КЛАССИЧЕСКАЯ в/к", 1.0, 1.0, "кг"),            # другой регистр
+                 ("Мясной «орешек» в/к", 0.5, 1.0, "кг"),
+                 ("Позиция, которой больше нет", 1.0, 1.0, "шт")]
+        found, missing = od.match_repeat(items, self.catalog)
+        self.assertEqual([(p.id, q) for p, q in found], [("neck", 1.0), ("nut", 0.5)])
+        self.assertEqual(missing, ["Позиция, которой больше нет"])
+        # временно недоступный товар не добавляем
+        import dataclasses
+        self.catalog.products[self.catalog.products.index(self.catalog.product("neck"))] = \
+            dataclasses.replace(self.catalog.product("neck"), available=False)
+        found, missing = od.match_repeat(items, self.catalog)
+        self.assertIn("шейка КЛАССИЧЕСКАЯ в/к", missing)
+
+    def test_db_stores_final_and_migrates_old_orders_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            import sqlite3
+            old = sqlite3.connect(path)     # база до появления взвешивания: в orders нет final_json
+            old.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL DEFAULT 'tg', "
+                        "user_id INTEGER NOT NULL, customer_name TEXT, username TEXT, phone TEXT, comment TEXT, "
+                        "items_json TEXT NOT NULL, total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'new', "
+                        "created_at TEXT NOT NULL)")
+            old.execute("INSERT INTO orders(platform, user_id, items_json, total, created_at) "
+                        "VALUES('vk', 1, '[[\"X\", 1.5, 10.0, \"кг\"]]', 15, '01.01.2026 10:00')")
+            old.commit()
+            old.close()
+            db = Database(path)
+
+            async def scenario():
+                order = await db.order(1)
+                self.assertIsNone(order.final_items)              # старый заказ читается как раньше
+                self.assertIsNone(order.final_total)
+                await db.set_order_final(1, [("X", 1.2, 10.0, "кг")], 12.0)
+                order = await db.order(1)
+                self.assertEqual(order.final_items, [("X", 1.2, 10.0, "кг")])
+                self.assertEqual(order.final_total, 12.0)
+                self.assertEqual(order.items, [("X", 1.5, 10.0, "кг")])   # заказанное не потерялось
+
+            asyncio.run(scenario())
+            db.close()
