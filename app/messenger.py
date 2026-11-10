@@ -176,6 +176,14 @@ class Messenger:
                 "Надеемся, всё пришлось по вкусу! Оцените, пожалуйста, — нам очень важно ваше мнение.")
         return await self._vk_send(order.user_id, text, vk_kb.review_stars(order.id))
 
+    async def greet_birthday(self, person, text: str) -> bool:
+        """Личное поздравление именинника в личные сообщения (во ВКонтакте — с кнопкой каталога)."""
+        if not person.user_id:
+            return False
+        if person.platform == "vk":
+            return await self._vk_send(person.user_id, text, vk_kb.catalog_button())
+        return await self._tg_send(person.user_id, text)
+
     async def notify_final(self, order: OrderView) -> bool:
         """Итог после взвешивания и реквизиты — покупателю. False — не дошло (например, закрыты сообщения)."""
         text = format_final_message(order, self.catalog.currency, self.settings.payment_details)

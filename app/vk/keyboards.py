@@ -203,6 +203,10 @@ def weigh_confirm(order_id: int) -> dict:
 
 
 # ── напоминание о корзине и оценка заказа ──
+def catalog_button() -> dict:
+    return inline([[text("🛍 Открыть каталог", {"cmd": "catalog"}, "positive")]])
+
+
 def cart_reminder() -> dict:
     return inline([[text("🛒 Открыть корзину", {"cmd": "cart"}, "positive")]])
 

@@ -5,12 +5,13 @@ import asyncio
 import json
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from app import jobs
 from app.config import Settings, _handles
 from app.context import build_context
+from app.core import birthdays as bd
 from app.core.orders import Catalog
 from app.vk import keyboards as kb
 from app.vk.bot import VkBot, resolve_command
@@ -1102,3 +1103,100 @@ class VkStatsCartAndReviewTests(VkTestCase):
                 for b in row:
                     self.assertLessEqual(len(b["action"]["label"]), kb.LABEL_MAX)
                     self.assertLessEqual(len(b["action"].get("payload", "")), 255)
+
+
+class VkPersonalBirthdayTests(VkTestCase):
+    """Личное поздравление покупателю в личные сообщения (бесед у сообщества нет)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ctx.settings.__dict__["vk_chat_peer_id"] = 0      # беседы нет вообще
+        self.ctx.settings.__dict__["group_chat_id"] = 0
+
+    def add_birthday(self, name, user, days=0, platform="vk"):
+        day = self.ctx.now().date() + timedelta(days=days)
+        return asyncio.run(self.ctx.db.add_birthday(name, day.day, day.month, platform, user))
+
+    def run_job(self):
+        asyncio.run(jobs.birthdays(self.ctx, self.ctx.now()))
+
+    def personal_texts(self, user):
+        return [(t, k) for p, t, k in self.api.sent if p == user and "🎁" in t and "Вижу в профиле" not in t]
+
+    def test_birthday_person_gets_personal_message_with_catalog_button(self):
+        self.add_birthday("Ольга Смирнова", CUSTOMER)
+        self.run_job()
+        sent = self.personal_texts(CUSTOMER)
+        self.assertEqual(len(sent), 1)
+        variants = [bd.personal_greeting(bd.Birthday(1, "Ольга", 1, 1), index=i) for i in range(6)]
+        self.assertIn(sent[0][0], variants)                                   # дословно один из шести утверждённых текстов
+        self.assertIn("Ольга", sent[0][0])
+        button = sent[0][1]["buttons"][0][0]["action"]
+        self.assertEqual(json.loads(button["payload"]), {"cmd": "catalog"})
+        self.assertEqual(self.api.texts_to(CHAT), [])                         # в беседу ничего — её нет
+
+    def test_greeting_not_repeated_same_year_even_after_restart(self):
+        self.add_birthday("Ольга Смирнова", CUSTOMER)
+        self.run_job()
+        self.run_job()                                                        # задача уже отработала сегодня
+        asyncio.run(self.ctx.db.kv_set("job:birthdays:last", "2000-01-01"))    # «перезапуск»: отметка дня сброшена
+        self.run_job()
+        self.assertEqual(len(self.personal_texts(CUSTOMER)), 1)               # а отметка «поздравили в этом году» осталась
+
+    def test_only_todays_people_with_known_user_get_message(self):
+        self.add_birthday("Пётр П.", STRANGER, days=3)                        # не сегодня
+        asyncio.run(self.ctx.db.add_birthday("Без аккаунта", self.ctx.now().day, self.ctx.now().month, "vk"))
+        self.add_birthday("Ольга Смирнова", CUSTOMER)
+        self.run_job()
+        self.assertEqual(self.personal_texts(STRANGER), [])
+        self.assertEqual(len(self.personal_texts(CUSTOMER)), 1)
+
+    def test_admins_still_get_tomorrow_reminder(self):
+        self.add_birthday("Пётр П.", STRANGER, days=1)
+        self.run_job()
+        self.assertTrue(any("Завтра день рождения" in t for t in self.api.texts_to(ADMIN)))
+        self.assertEqual(self.personal_texts(STRANGER), [])                   # завтрашнему — пока ничего
+
+    def test_telegram_person_does_not_break_job(self):
+        self.add_birthday("Tg User", 999, platform="tg")
+        self.add_birthday("Ольга Смирнова", CUSTOMER)
+        self.run_job()
+        self.assertEqual(len(self.personal_texts(CUSTOMER)), 1)
+
+    def test_group_greeting_only_when_a_chat_exists(self):
+        self.add_birthday("Ольга Смирнова", CUSTOMER)
+        self.ctx.settings.__dict__["vk_chat_peer_id"] = CHAT
+        self.run_job()
+        self.assertTrue(any("Ольга" in t for t in self.api.texts_to(CHAT)))   # если беседа появится — общий пост работает
+        self.assertEqual(len(self.personal_texts(CUSTOMER)), 1)               # и личное поздравление тоже
+
+    # ── пробные команды админа ───────────────────────────────
+    def test_test_bd_sends_personal_variants_to_admin_only(self):
+        self.run_all(message(ADMIN, ADMIN, "/test_bd"))
+        mine = [bd.personal_greeting(bd.Birthday(1, "Евгений", 1, 1), index=i) for i in range(6)]
+        self.assertIn(self.api.texts_to(ADMIN)[-1], mine)
+        self.run_all(message(ADMIN, ADMIN, "/test_bd все"))
+        last6 = self.api.texts_to(ADMIN)[-6:]
+        for i, text in enumerate(last6, start=1):
+            self.assertTrue(text.startswith(f"— вариант {i} из 6 —"))
+        self.assertEqual(len({t.split("—", 2)[2] for t in last6}), 6)         # шесть разных текстов
+        self.run_all(message(CUSTOMER, CUSTOMER, "/test_bd"))
+        self.assertEqual(self.personal_texts(CUSTOMER), [])                   # не админам — тишина
+
+    def test_weather_tests_go_to_admin_dm_and_nowhere_else(self):
+        self.run_all(message(ADMIN, ADMIN, "/test_morning"), message(ADMIN, ADMIN, "/test_evening"))
+        reports = self.api.texts_to(ADMIN)[-2:]
+        self.assertTrue(all(len(t) > 40 for t in reports))
+        self.assertFalse(any("отправлена в группу" in t for t in self.api.texts_to(ADMIN)))
+        self.assertEqual(self.api.texts_to(CHAT), [])
+        self.run_all(message(CUSTOMER, CUSTOMER, "/test_morning"))
+        self.assertFalse(any("Погода" in t or "°" in t for t in self.api.texts_to(CUSTOMER)))
+
+    def test_weather_test_reports_failure_honestly(self):
+        from unittest import mock
+        with mock.patch("app.services.weather_reports.morning_report", side_effect=RuntimeError("нет сети")):
+            self.run_all(message(ADMIN, ADMIN, "/test_morning"))
+        self.assertIn("Не удалось получить прогноз", self.api.texts_to(ADMIN)[-1])
+        with mock.patch("app.services.weather_reports.evening_report", return_value=None):
+            self.run_all(message(ADMIN, ADMIN, "/test_evening"))
+        self.assertIn("ничего не вернул", self.api.texts_to(ADMIN)[-1])

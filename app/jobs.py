@@ -67,8 +67,18 @@ async def birthdays(ctx: AppContext, now: datetime) -> None:
     items = await ctx.db.list_birthdays()
     today = now.date()
     people = [b for b in items if bd.is_today(b, today)]
-    if people:
+    s = ctx.settings
+    if people and (s.vk_chat_peer_id or s.group_chat_id):   # общий пост — только если есть группа или беседа
         await ctx.messenger.to_groups(await make_greeting(ctx, people))
+    for person in people:                                   # личное поздравление каждому именинному покупателю
+        if not person.user_id:
+            continue
+        key = f"bdgreet:{person.platform}:{person.user_id}:{today.year}"   # раз в год на человека
+        if await ctx.db.kv_get(key):
+            continue
+        await ctx.db.kv_set(key, {"sent": now.timestamp()})
+        if await ctx.messenger.greet_birthday(person, bd.personal_greeting(person)):
+            logger.info("Личное поздравление отправлено: %s %s", person.platform, person.user_id)
     # Владельцу и админам — подсказка о завтрашних именинниках (успеть с подарком 🎁).
     tomorrow = [b for b in items if bd.is_today(b, today + timedelta(days=1))]
     if tomorrow:

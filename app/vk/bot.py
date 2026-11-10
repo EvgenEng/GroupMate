@@ -467,15 +467,10 @@ class VkBot:
 
     async def admin_command(self, cmd: str, arg: str, peer_id: int, reply: dict) -> None:
         ctx = self.ctx
-        if cmd == "test_morning":
-            await jobs.weather_morning(ctx, ctx.now(), force=True)
-            await self.send(peer_id, "✅ Утренняя сводка отправлена в группу и беседу.")
-        elif cmd == "test_evening":
-            await jobs.weather_evening(ctx, ctx.now(), force=True)
-            await self.send(peer_id, "✅ Вечерняя сводка отправлена в группу и беседу.")
+        if cmd in {"test_morning", "test_evening"}:
+            await self.send(peer_id, await self.weather_test(morning=cmd == "test_morning"))
         elif cmd == "test_bd":
-            me = bd.Birthday(id=0, name="Тестовый Именинник", day=1, month=1)
-            await self.send(peer_id, await jobs.make_greeting(ctx, [me]))
+            await self.birthday_test(peer_id, arg)
         elif cmd == "bd_list":
             items = await ctx.db.list_birthdays()
             rows = [f"{b.id} · {b.day:02d}.{b.month:02d} · {b.mention()}" for b in items]
@@ -915,6 +910,32 @@ class VkBot:
             return int(value)
         except (TypeError, ValueError):
             return 0
+
+    # ── пробные сообщения для админа ────────────────────────────
+    async def weather_test(self, morning: bool) -> str:
+        """Текст сводки погоды — прямо в личные сообщения админу (никуда больше не отправляется)."""
+        now = self.ctx.now()
+        try:
+            if morning:
+                text = await weather_reports.morning_report(self.ctx.weather, self.ctx.db, now.date())
+            else:
+                text = await weather_reports.evening_report(self.ctx.weather, now.date())
+        except Exception as exc:  # noqa: BLE001 — нет интернета или сервис погоды недоступен
+            logger.warning("ВК: пробная сводка погоды не получилась: %s", exc)
+            return "⚠️ Не удалось получить прогноз: нет связи с сервисом погоды. Проверьте интернет и повторите."
+        return text or "⚠️ Сервис погоды ничего не вернул. Попробуйте чуть позже."
+
+    async def birthday_test(self, peer_id: int, arg: str) -> None:
+        """Пробное личное поздравление: одно случайное или «/test_bd все» — все варианты подряд."""
+        name = await self.full_name(peer_id) if peer_id > 0 else ""
+        me = bd.Birthday(id=0, name=name, day=1, month=1, user_id=peer_id if peer_id > 0 else None, platform=PLATFORM)
+        if arg.strip().lower() in {"все", "всё", "all"}:
+            total = len(bd.PERSONAL_GREETINGS)
+            for i in range(total):
+                await self.send(peer_id, f"<i>— вариант {i + 1} из {total} —</i>\n\n" + bd.personal_greeting(me, index=i),
+                                kb.catalog_button())
+        else:
+            await self.send(peer_id, bd.personal_greeting(me), kb.catalog_button())
 
     # ── статистика и выгрузка (админы) ─────────────────────────
     async def stats_text(self, days: int) -> str:

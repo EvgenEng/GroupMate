@@ -562,3 +562,40 @@ class StatsAndExportCoreTests(unittest.TestCase):
 
             asyncio.run(scenario())
             db.close()
+
+
+class GreetingTextsTests(unittest.TestCase):
+    """Тексты поздравлений: общие (по 3 → 6) и личные для покупателя."""
+
+    def test_variants_are_complete_and_unique(self):
+        from app.core import birthdays as bd
+        self.assertEqual(len(bd.FALLBACK_GREETINGS), 6)
+        self.assertEqual(len(bd.PERSONAL_GREETINGS), 6)
+        for text in bd.FALLBACK_GREETINGS:
+            self.assertIn("{names}", text)
+            self.assertNotIn("{", text.replace("{names}", ""))
+        for text in bd.PERSONAL_GREETINGS:
+            self.assertIn("{name}", text)
+            self.assertNotIn("{", text.replace("{name}", ""))
+            self.assertIn("подар", text)                              # в каждом — напоминание про подарок к заказу
+            self.assertTrue(text.split("{name}")[0].strip() in {"🎂", "🥳", "🐻", "🎉", "✨", "🌟"})   # имя в начале фразы
+            self.assertNotIn("&", text)
+            self.assertNotIn("<", text)
+        self.assertEqual(len(set(bd.FALLBACK_GREETINGS)), 6)
+        self.assertEqual(len(set(bd.PERSONAL_GREETINGS)), 6)
+
+    def test_personal_name(self):
+        from app.core import birthdays as bd
+        person = lambda name: bd.Birthday(1, name, 1, 1, 10, None, "vk")
+        self.assertEqual(bd.personal_name(person("Ольга Смирнова")), "Ольга")
+        self.assertEqual(bd.personal_name(person("  Пётр ")), "Пётр")
+        self.assertEqual(bd.personal_name(person("id12345")), "Дорогой друг")
+        self.assertEqual(bd.personal_name(person("")), "Дорогой друг")
+        self.assertEqual(bd.personal_name(person("<b>Оля</b> Иванова")), "&lt;b&gt;Оля&lt;/b&gt;")   # без разметки от пользователя
+        text = bd.personal_greeting(person("Ольга Смирнова"), index=2)
+        self.assertTrue(text.startswith("🐻 Ольга, это мишка из GASTRODOM"))
+        for i in range(6):                                           # каждый вариант собирается без ошибок
+            self.assertIn("Ольга", bd.personal_greeting(person("Ольга"), index=i))
+        import random
+        seen = {bd.personal_greeting(person("Ольга"), random.Random(seed)) for seed in range(60)}
+        self.assertEqual(len(seen), 6)                              # при случайном выборе встречаются все шесть
