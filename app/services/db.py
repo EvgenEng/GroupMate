@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.core.birthdays import Birthday
+from app.core.contacts import normalize_phone
 from app.core.orders import OrderView
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,34 @@ class Database:
             self._migrate()
             self._conn.executescript(SCHEMA)
             self._conn.commit()
+            self._normalize_phones()
+
+    def _normalize_phones(self) -> None:
+        """Один раз: телефоны в старых заказах и сохранённых контактах → единый вид «+7 999 123-45-67».
+        То, что не похоже на телефон, остаётся как было."""
+        if self._conn.execute("SELECT 1 FROM kv WHERE key='migrate:phones:v1'").fetchone():
+            return
+        changed = 0
+        for row in self._conn.execute("SELECT id, phone FROM orders WHERE phone IS NOT NULL AND phone != ''").fetchall():
+            new = normalize_phone(row["phone"])
+            if new and new != row["phone"]:
+                self._conn.execute("UPDATE orders SET phone=? WHERE id=?", (new, row["id"]))
+                changed += 1
+        for row in self._conn.execute("SELECT key, value FROM kv WHERE substr(key, 1, 8) = 'contact:'").fetchall():
+            try:
+                data = json.loads(row["value"])
+            except ValueError:
+                continue
+            new = normalize_phone(data.get("phone")) if isinstance(data, dict) else None
+            if new and new != data.get("phone"):
+                data["phone"] = new
+                self._conn.execute("UPDATE kv SET value=? WHERE key=?", (json.dumps(data, ensure_ascii=False), row["key"]))
+                changed += 1
+        self._conn.execute("INSERT OR REPLACE INTO kv(key, value) VALUES('migrate:phones:v1', ?)",
+                           (json.dumps({"changed": changed}),))
+        self._conn.commit()
+        if changed:
+            logger.info("Телефоны приведены к единому виду: %s записей", changed)
 
     # ── миграция базы первой версии ────────────────────────
     def _columns(self, table: str) -> list[str]:

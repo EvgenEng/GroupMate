@@ -206,10 +206,10 @@ class VkScenarioTests(VkTestCase):
                      message(buyer, buyer, "✅ Петров Иван", {"cmd": "use_name"}))
         boards = json.dumps([k for p, _, k in self.api.sent if p == buyer], ensure_ascii=False)
         self.assertIn("✅ Петров Иван", boards)
-        self.assertIn("📞 89991112233", boards)
-        self.run_all(message(buyer, buyer, "📞 89991112233", {"cmd": "use_phone"}),
+        self.assertIn("📞 +7 999 111-22-33", boards)                  # введён как «89991112233», хранится в едином виде
+        self.run_all(message(buyer, buyer, "📞 +7 999 111-22-33", {"cmd": "use_phone"}),
                      message(buyer, buyer, "Без комментария", {"cmd": "no_comment"}), event(buyer, {"a": "co_ok"}))
-        self.assertEqual(asyncio.run(self.ctx.db.order(2)).phone, "89991112233")
+        self.assertEqual(asyncio.run(self.ctx.db.order(2)).phone, "+7 999 111-22-33")
         self.assertFalse(any("дату вашего дня рождения" in t for t in self.api.texts_to(buyer)))
 
     def test_chat_catalog_button_sends_to_dm_or_opens_dialog(self):
@@ -1200,3 +1200,77 @@ class VkPersonalBirthdayTests(VkTestCase):
         with mock.patch("app.services.weather_reports.evening_report", return_value=None):
             self.run_all(message(ADMIN, ADMIN, "/test_evening"))
         self.assertIn("ничего не вернул", self.api.texts_to(ADMIN)[-1])
+
+
+class VkFlexibleInputTests(VkTestCase):
+    """Телефон и день рождения в любом виде — в чате с ботом."""
+
+    PHONE_FORMATS = ["+79991234567", "89991234567", "+7(999)1234567", "8(999)1234567", "+7(999)123-45-67",
+                     "8(999)123-45-67", "8 999 123 45 67", "+7 999 123 45 67", "9991234567", "999 123-45-67"]
+
+    def order_as(self, buyer, phone_text, birthday_text=None):
+        """Оформляет заказ с таким телефоном; возвращает сохранённый заказ."""
+        flow = [event(buyer, {"a": "add", "v": "set-week"}), event(buyer, {"a": "checkout"}),
+                message(buyer, buyer, "Иван Петров"), message(buyer, buyer, phone_text),
+                message(buyer, buyer, "Без комментария", {"cmd": "no_comment"}), event(buyer, {"a": "co_ok"})]
+        if birthday_text is not None:
+            flow.append(message(buyer, buyer, birthday_text))
+        self.run_all(*flow)
+        orders = asyncio.run(self.ctx.db.orders_of("vk", buyer, limit=1))
+        return orders[0] if orders else None
+
+    def test_every_phone_format_is_saved_in_one_view(self):
+        for i, raw in enumerate(self.PHONE_FORMATS):
+            order = self.order_as(500 + i, raw)
+            self.assertIsNotNone(order, raw)
+            self.assertEqual(order.phone, "+7 999 123-45-67", raw)
+
+    def test_incomplete_phone_is_asked_again_then_accepted(self):
+        buyer = 520
+        self.run_all(event(buyer, {"a": "add", "v": "set-week"}), event(buyer, {"a": "checkout"}),
+                     message(buyer, buyer, "Иван Петров"), message(buyer, buyer, "8905"))
+        self.assertIn("Не похоже на номер", self.api.texts_to(buyer)[-1])
+        self.assertEqual(self.bot.checkout[buyer]["step"], "phone")                # ждёт номер дальше
+        self.run_all(message(buyer, buyer, "+7 (905) 123-4567"))
+        self.assertEqual(self.bot.checkout[buyer]["phone"], "+7 905 123-45-67")
+        self.run_all(message(buyer, buyer, "Без комментария", {"cmd": "no_comment"}))
+        self.assertIn("+7 905 123-45-67", self.api.texts_to(buyer)[-1])           # в подтверждении — единый вид
+
+    def test_handoff_phone_is_normalized_for_manager(self):
+        self.run_all(message(CUSTOMER, CUSTOMER, "", {"cmd": "manager"}),
+                     message(CUSTOMER, CUSTOMER, "Нужен банкет на 30 человек"),
+                     message(CUSTOMER, CUSTOMER, "8(999)123-45-67"))
+        got = self.api.texts_to(MANAGER)
+        self.assertEqual(len(got), 1)
+        self.assertIn("+7 999 123-45-67", got[0])
+        self.assertNotIn("8(999)", got[0])
+
+    def test_birthday_after_order_in_any_format(self):
+        formats = ["04.01", "4 января", "4янв", "04 янв.", "4-го января 1990 года", "4/1", "Четвёртого января 4"]
+        for i, raw in enumerate(formats[:-1]):
+            buyer = 530 + i
+            self.order_as(buyer, "89991234567", raw)
+            birthday = asyncio.run(self.ctx.db.birthday_of("vk", buyer))
+            self.assertEqual((birthday.day, birthday.month), (4, 1), raw)
+        buyer = 540                                                                # неправильная дата — переспросим
+        self.order_as(buyer, "89991234567", "31.04")
+        self.assertIsNone(asyncio.run(self.ctx.db.birthday_of("vk", buyer)))
+        self.assertIn("например: 15.04 или 15 апреля", self.api.texts_to(buyer)[-1])
+        self.run_all(message(buyer, buyer, "15 апр"))
+        self.assertEqual(asyncio.run(self.ctx.db.birthday_of("vk", buyer)).month, 4)
+
+    def test_my_birthday_command_variants(self):
+        for text, expected in {"др 3.4": (3, 4), "др 5 мая": (5, 5), "др 10 дек": (10, 12), "др 07янв": (7, 1),
+                               "др 2 февраля 1985 года": (2, 2), "др 31/12": (31, 12)}.items():
+            self.run_all(message(MANAGER, MANAGER, text))
+            birthday = asyncio.run(self.ctx.db.birthday_of("vk", MANAGER))
+            self.assertEqual((birthday.day, birthday.month), expected, text)
+
+    def test_admin_bd_add_accepts_words_and_numbers(self):
+        self.run_all(message(ADMIN, ADMIN, "/bd_add 15 апреля Иван Петров"),
+                     message(ADMIN, ADMIN, "/bd_add 1.2 Анна"),
+                     message(ADMIN, ADMIN, "/bd_add 4 янв 1990 Мария Сидорова"))
+        found = {b.name: (b.day, b.month) for b in asyncio.run(self.ctx.db.list_birthdays())}
+        self.assertEqual(found.get("Иван Петров"), (15, 4))
+        self.assertEqual(found.get("Анна"), (1, 2))
+        self.assertEqual(found.get("Мария Сидорова"), (4, 1))

@@ -599,3 +599,84 @@ class GreetingTextsTests(unittest.TestCase):
         import random
         seen = {bd.personal_greeting(person("Ольга"), random.Random(seed)) for seed in range(60)}
         self.assertEqual(len(seen), 6)                              # при случайном выборе встречаются все шесть
+
+
+class PhoneAndDateParsingTests(unittest.TestCase):
+    """Телефон и день рождения принимаются в любом написании и приводятся к единому виду."""
+
+    def test_phone_in_any_format_becomes_one_view(self):
+        from app.core.contacts import normalize_phone
+        same = ["+79991234567", "89991234567", "+7(999)1234567", "8(999)1234567", "+7(999)123-45-67",
+                "8(999)123-45-67", "8 999 123 45 67", "+7 999 123 45 67", "9991234567", "999 123-45-67",
+                "7 999 123-45-67", "8-999-123-45-67", "8.999.123.45.67", "+7 8 999 123 45 67",
+                "  +7 (999) 123 - 45 - 67  ", "Мой номер: 8 (999) 123-45-67, звоните после 18", "тел 89991234567"]
+        for raw in same:
+            self.assertEqual(normalize_phone(raw), "+7 999 123-45-67", raw)
+        self.assertEqual(normalize_phone("8 495 123-45-67"), "+7 495 123-45-67")      # городской с кодом
+        self.assertEqual(normalize_phone("8 800 555-35-35"), "+7 800 555-35-35")
+        self.assertEqual(normalize_phone("+375 29 123-45-67"), "+375291234567")       # другая страна — без разбора
+        for bad in ("", None, "abc", "8905", "999 123", "89991234", "1234567890", "04.01.1990", "+7 000 123 45 67",
+                    "не скажу", "123456"):
+            self.assertIsNone(normalize_phone(bad), bad)
+
+    def test_phone_digits_for_search(self):
+        from app.core.contacts import phone_digits
+        self.assertEqual(phone_digits("8 (999) 123-45-67"), "79991234567")
+        self.assertEqual(phone_digits("+7 999 123-45-67"), phone_digits("9991234567"))
+
+    def test_birthday_in_any_format(self):
+        from app.core import birthdays as bd
+        january_4 = ["04.01", "4.01", "4.1", "04/01", "4-01", "4 01", "04 января", "4 января", "4 Января", "04 ЯНВАРЯ",
+                     "4 янв", "4янв", "04янв", "04 янв.", "4янв.", "4-го января", "4го января", "январь 4", "янв 4",
+                     "04.01.1990", "4 января 1990 года", "4 января 1990г", "04.01.90", "0401", "040190", "04011990",
+                     "мой день рождения 4 января", "4 января,"]
+        for raw in january_4:
+            self.assertEqual(bd.parse_day_month(raw), (4, 1), raw)
+        months = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "июн": 6, "июл": 7, "авг": 8, "сен": 9,
+                  "окт": 10, "ноя": 11, "дек": 12}
+        for word, number in months.items():                      # сокращения из задачи, с точкой и без
+            self.assertEqual(bd.parse_day_month(f"10 {word}"), (10, number), word)
+            self.assertEqual(bd.parse_day_month(f"10{word}."), (10, number), word)
+        full = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
+                "ноября", "декабря"]
+        for number, word in enumerate(full, start=1):
+            self.assertEqual(bd.parse_day_month(f"7 {word}"), (7, number), word)
+        self.assertEqual(bd.parse_day_month("1 мая"), (1, 5))
+        self.assertEqual(bd.parse_day_month("1 март"), (1, 3))                     # не путаем март и май
+        self.assertEqual(bd.parse_day_month("29 февраля"), (29, 2))
+        for bad in ("", "   ", "4", "янв", "абв", "2024", "31.04", "32.01", "13.13", "31 июня", "30 февраля", "4 какого"):
+            self.assertIsNone(bd.parse_day_month(bad), bad)
+
+    def test_date_prefix_for_bd_add(self):
+        from app.core import birthdays as bd
+        self.assertEqual(bd.parse_date_prefix("4 января Иван Петров"), (4, 1, "Иван Петров"))
+        self.assertEqual(bd.parse_date_prefix("15.04 Иван"), (15, 4, "Иван"))
+        self.assertEqual(bd.parse_date_prefix("4 янв 1990 Анна Смирнова"), (4, 1, "Анна Смирнова"))
+        self.assertEqual(bd.parse_date_prefix("4 01 Иван"), (4, 1, "Иван"))
+        self.assertEqual(bd.parse_date_prefix("15 апреля"), (15, 4, ""))
+        self.assertIsNone(bd.parse_date_prefix("Иван 15.04"))
+        self.assertIsNone(bd.parse_date_prefix(""))
+
+    def test_old_phones_are_unified_once_on_startup(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            first = Database(path)
+            asyncio.run(first.create_order("vk", 1, "О", None, "89991234567", "", [("X", 1.0, 10.0, "кг")], 10.0))
+            asyncio.run(first.create_order("vk", 2, "П", None, "позвоните мне", "", [("X", 1.0, 10.0, "кг")], 10.0))
+            asyncio.run(first.kv_set("contact:vk:1", {"name": "О", "phone": "8(999)123-45-67"}))
+            first.close()
+            raw = sqlite3.connect(path)                      # возвращаем «как было»: сбрасываем отметку миграции
+            raw.execute("DELETE FROM kv WHERE key='migrate:phones:v1'")
+            raw.execute("UPDATE orders SET phone='89991234567' WHERE id=1")
+            raw.execute("UPDATE kv SET value=? WHERE key='contact:vk:1'", ('{"name": "О", "phone": "8(999)123-45-67"}',))
+            raw.commit()
+            raw.close()
+            db = Database(path)
+            self.assertEqual(asyncio.run(db.order(1)).phone, "+7 999 123-45-67")
+            self.assertEqual(asyncio.run(db.order(2)).phone, "позвоните мне")                 # не телефон — не трогаем
+            self.assertEqual(asyncio.run(db.kv_get("contact:vk:1"))["phone"], "+7 999 123-45-67")
+            db.close()
+            again = Database(path)                             # повторный запуск ничего не меняет
+            self.assertEqual(asyncio.run(again.order(1)).phone, "+7 999 123-45-67")
+            again.close()

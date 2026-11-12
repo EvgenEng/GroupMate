@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemo
 
 from app import keyboards as kb
 from app.context import AppContext
+from app.core.contacts import normalize_phone
 from app.core.orders import STATUSES, catalog_intro, checkout_comment_hint, format_cart, format_order, \
     format_product
 
@@ -144,11 +145,11 @@ async def checkout_cancel(message: Message, state: FSMContext) -> None:
 @router.message(Checkout.phone)
 async def checkout_phone(message: Message, state: FSMContext, ctx: AppContext) -> None:
     if message.contact:
-        phone = message.contact.phone_number
-    elif message.text and PHONE_RE.match(message.text.strip()):
-        phone = message.text.strip()
+        phone = normalize_phone(message.contact.phone_number) or message.contact.phone_number
+    elif message.text and normalize_phone(message.text):
+        phone = normalize_phone(message.text)
     else:
-        await message.answer("Не похоже на номер 🤔 Отправьте кнопкой или напишите, например: +7 999 123-45-67")
+        await message.answer("Не похоже на номер 🤔 Отправьте кнопкой или напишите в любом виде, например: 8 999 123-45-67")
         return
     await state.update_data(phone=phone)
     await state.set_state(Checkout.comment)

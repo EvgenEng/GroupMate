@@ -20,6 +20,7 @@ from app.context import AppContext
 from app.core import birthdays as bd
 from app.core.faq_bot import FaqBot, Reply
 from app.core.knowledge import HANDOFF_FALLBACK, format_handoff, split_handoff
+from app.core.contacts import normalize_phone
 from app.core.stats import compute_stats, export_tables, format_stats, parse_days
 from app.core.xlsx import write_xlsx
 from app.core.orders import STATUSES, OrderView, apply_weights, catalog_intro, checkout_comment_hint, fmt_qty, \
@@ -33,7 +34,6 @@ from app.vk.format import html_to_vk
 logger = logging.getLogger(__name__)
 
 PLATFORM = "vk"
-PHONE_RE = re.compile(r"^\+?[\d\s\-()]{7,20}$")
 
 # Команды словами. Целое сообщение должно совпасть с фразой (или начинаться с «/»).
 PHRASES = {
@@ -427,7 +427,7 @@ class VkBot:
         mine = await self.ctx.db.birthday_of(PLATFORM, user_id)
         text = (f"🎂 Ваш день рождения у меня записан: {mine.date_text()}.\n\n" if mine
                 else "🎂 Вашего дня рождения пока нет в списке.\n\n")
-        text += "Записать или поменять: напишите «др 15.04» (день.месяц).\nУбрать: «др удалить»."
+        text += "Записать или поменять: напишите «др 15.04» или «др 15 апреля».\nУбрать: «др удалить»."
         await self.send(peer_id, text)
 
     async def cmd_mybd(self, peer_id: int, user_id: int, arg: str) -> None:
@@ -479,12 +479,12 @@ class VkBot:
             ok = arg.isdigit() and await ctx.db.delete_birthday(int(arg))
             await self.send(peer_id, "🗑 Удалено." if ok else "Формат: /bd_del ID (ID смотрите в /bd_list)")
         elif cmd == "bd_add":
-            parts = arg.split(maxsplit=1)
-            parsed = bd.parse_day_month(parts[0]) if parts else None
+            found = bd.parse_date_prefix(arg)          # дата в любом виде в начале: «15.04» или «15 апреля»
+            parsed = found[:2] if found else None
             target = reply.get("from_id") if reply and reply.get("from_id", 0) > 0 else None
-            name = parts[1].strip() if len(parts) > 1 else (await self.full_name(target) if target else "")
+            name = found[2].strip() if found and found[2].strip() else (await self.full_name(target) if target else "")
             if not parsed or not name:
-                await self.send(peer_id, "Формат: /bd_add 15.04 Иван Петров\n"
+                await self.send(peer_id, "Формат: /bd_add 15.04 Иван Петров (или «15 апреля Иван Петров»)\n"
                                          "Можно ответом на сообщение человека — тогда он будет упомянут.")
                 return
             bd_id = await ctx.db.add_birthday(name, parsed[0], parsed[1], PLATFORM, target)
@@ -603,7 +603,7 @@ class VkBot:
         await self.ask_handoff_phone(user_id, state)
 
     async def ask_handoff_phone(self, user_id: int, state: dict) -> None:
-        await self.send(user_id, "📞 Напишите телефон — менеджер позвонит или напишет вам. Например: +7 999 123-45-67\n"
+        await self.send(user_id, "📞 Напишите телефон — менеджер позвонит или напишет вам. В любом виде, например: 8 999 123-45-67\n"
                                  "Если телефон не хотите оставлять, выберите «без телефона» — менеджер напишет вам в ВК.",
                         kb.handoff_phone(state.get("saved_phone", "")))
 
@@ -800,9 +800,10 @@ class VkBot:
             if cmd == "no_phone":
                 phone = ""
             else:
-                phone = state.get("saved_phone", "") if cmd == "use_phone" else text
-                if not phone or not PHONE_RE.match(phone):
-                    await self.send(user_id, "Не похоже на номер 🤔 Напишите, например: +7 999 123-45-67 — "
+                raw = state.get("saved_phone", "") if cmd == "use_phone" else text
+                phone = normalize_phone(raw) or (raw if cmd == "use_phone" else "")
+                if not phone:
+                    await self.send(user_id, "Не похоже на номер 🤔 Напишите в любом виде, например: 8 999 123-45-67 — "
                                              "или выберите вариант «без телефона».", kb.handoff_phone(state.get("saved_phone", "")))
                     return
             await self.finish_handoff(user_id, state["question"], state.get("answer", ""), phone)
@@ -813,14 +814,16 @@ class VkBot:
                 await self.send(user_id, "Напишите, пожалуйста, фамилию и имя — например: Иванова Мария",
                                 kb.name_choice(state.get("suggested", "")))
                 return
-            saved_phone = (await self.contact(user_id)).get("phone", "")
+            saved = (await self.contact(user_id)).get("phone", "")
+            saved_phone = normalize_phone(saved) or saved          # старые записи показываем уже в едином виде
             state.update(step="phone", name=name, saved_phone=saved_phone)
-            await self.send(user_id, "📞 Напишите телефон для связи — например, +7 999 123-45-67",
+            await self.send(user_id, "📞 Напишите телефон для связи — в любом виде, например: 8 999 123-45-67",
                             kb.phone_cancel(saved_phone))
         elif step == "phone":
-            phone = state.get("saved_phone", "") if cmd == "use_phone" else text
-            if not phone or not PHONE_RE.match(phone):
-                await self.send(user_id, "Не похоже на номер 🤔 Напишите, например: +7 999 123-45-67",
+            raw = state.get("saved_phone", "") if cmd == "use_phone" else text
+            phone = normalize_phone(raw) or (raw if cmd == "use_phone" else "")
+            if not phone:
+                await self.send(user_id, "Не похоже на номер 🤔 Напишите в любом виде, например: 8 999 123-45-67",
                                 kb.phone_cancel(state.get("saved_phone", "")))
                 return
             state.update(step="comment", phone=phone)
@@ -880,9 +883,9 @@ class VkBot:
             self.checkout.pop(user_id, None)
             await self.send(user_id, "Хорошо! Если передумаете — напишите «др 15.04» 🙂", kb.main_menu())
             return
-        parsed = bd.parse_vk_bdate(text.replace("/", ".").replace("-", ".").replace(" ", "."))
+        parsed = bd.parse_day_month(text)
         if not parsed:
-            await self.send(user_id, "Напишите дату так: 15.04 (день и месяц) — или нажмите «Пропустить».",
+            await self.send(user_id, "Напишите день и месяц, например: 15.04 или 15 апреля — или нажмите «Пропустить».",
                             kb.birthday_skip())
             return
         self.checkout.pop(user_id, None)

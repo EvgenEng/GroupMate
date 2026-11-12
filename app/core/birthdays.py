@@ -41,20 +41,75 @@ def order_on_birthday(b: Birthday, created_at: str) -> bool:
     return bool(m) and (int(m.group(1)), int(m.group(2))) == (b.day, b.month)
 
 
-_DATE_RE = re.compile(r"^(\d{1,2})[.\-/](\d{1,2})$")
+# Месяц по первым буквам: «янв», «января», «январь», «сент.» → 1…12. «мая/май» — отдельно (рядом «мар»).
+_MONTH_STEMS = (("янв", 1), ("фев", 2), ("мар", 3), ("апр", 4), ("июн", 6), ("июл", 7),
+                ("авг", 8), ("сен", 9), ("окт", 10), ("ноя", 11), ("дек", 12))
+_DAY = r"(\d{1,2})(?:-?(?:го|ого|ое|е|й|ый))?"      # «4», «04», «4-го», «4го»
+_YEAR = r"(?:\s*(?:\d{4}|\d{2})\s*(?:г\.?|года?)?)?"  # необязательный год: его не храним
+_NUMERIC_RE = re.compile(r"^(\d{1,2})\s*[.,/\-\s]\s*(\d{1,2})(?:\s*[.,/\-\s]\s*(?:\d{4}|\d{2}))?\.?$")
+_NAMED_RE = re.compile(rf"^{_DAY}\s*[.\-]?\s*([а-яё]{{3,}})\.?{_YEAR}$")
+_MONTH_FIRST_RE = re.compile(r"^([а-яё]{3,})\.?\s*(\d{1,2})$")
+_DIGITS_RE = re.compile(r"^(\d{2})(\d{2})(?:\d{2}|\d{4})?$")   # 0401, 040190, 04011990
 
 
-def parse_day_month(text: str) -> tuple[int, int] | None:
-    """«05.03», «5.3», «5/3» → (5, 3). Проверяет, что дата существует (29.02 разрешено)."""
-    m = _DATE_RE.match(text.strip())
-    if not m:
-        return None
-    day, month = int(m.group(1)), int(m.group(2))
+def month_from_word(word: str) -> int | None:
+    w = word.lower().replace("ё", "е").strip(".,")
+    if w in {"май", "мая", "мае", "маю", "маем"}:
+        return 5
+    for stem, number in _MONTH_STEMS:
+        if w.startswith(stem):
+            return number
+    return None
+
+
+def _valid(day: int, month: int) -> tuple[int, int] | None:
     try:
         date(2024, month, day)  # високосный год, чтобы 29.02 проходило
     except ValueError:
         return None
     return day, month
+
+
+def _parse_exact(text: str) -> tuple[int, int] | None:
+    s = text.strip().lower().replace("ё", "е").rstrip(",;:!")
+    if not s:
+        return None
+    if m := _NUMERIC_RE.match(s):
+        return _valid(int(m.group(1)), int(m.group(2)))
+    if m := _NAMED_RE.match(s):
+        month = month_from_word(m.group(2))
+        return _valid(int(m.group(1)), month) if month else None
+    if m := _MONTH_FIRST_RE.match(s):
+        month = month_from_word(m.group(1))
+        return _valid(int(m.group(2)), month) if month else None
+    if m := _DIGITS_RE.match(s):
+        return _valid(int(m.group(1)), int(m.group(2)))
+    return None
+
+
+def parse_date_prefix(text: str) -> tuple[int, int, str] | None:
+    """Дата в начале строки + остаток: «4 января Иван Петров» → (4, 1, «Иван Петров»)."""
+    tokens = text.split()
+    for count in range(min(5, len(tokens)), 0, -1):          # самая длинная подходящая дата («4 января 1990 года»)
+        parsed = _parse_exact(" ".join(tokens[:count]))
+        if parsed:
+            return parsed[0], parsed[1], " ".join(tokens[count:])
+    return None
+
+
+def parse_day_month(text: str) -> tuple[int, int] | None:
+    """День и месяц в любом написании → (день, месяц). Год, если есть, не нужен.
+
+    «04.01», «4.1», «04/01», «4-01», «4 01», «04 января», «4 янв», «4янв.», «4-го января», «январь 4»,
+    «04.01.1990», «4 января 1990 года». Проверяет, что такая дата бывает (29.02 разрешено).
+    Находит дату и внутри фразы: «мой день рождения 4 января»."""
+    tokens = text.split()
+    for start in range(len(tokens)):
+        for count in range(min(5, len(tokens) - start), 0, -1):
+            parsed = _parse_exact(" ".join(tokens[start:start + count]))
+            if parsed:
+                return parsed
+    return None
 
 
 def next_occurrence(day: int, month: int, today: date) -> date:
@@ -97,7 +152,8 @@ def days_word(n: int) -> str:
 
 
 DEFAULT_BIRTHDAY_OFFER = ("🎁 Подскажите дату вашего дня рождения — если закажете у нас в этот день, "
-                          "добавим к заказу вкусный подарок и поздравим вас!\n\nНапишите день и месяц, например: 15.04")
+                          "добавим к заказу вкусный подарок и поздравим вас!\n\n"
+                          "Напишите день и месяц, например: 15.04 или 15 апреля")
 
 FALLBACK_GREETINGS = [
     "🎉 Сегодня день рождения у {names}!\n\nПусть этот год будет щедрым на радость, тёплых людей "
