@@ -69,17 +69,47 @@ class VkApi:
         return await self.call("messages.edit", peer_id=peer_id, conversation_message_id=conversation_message_id,
                                message=text, keyboard=keyboard, dont_parse_links=1)
 
-    async def upload_message_photo(self, peer_id: int, path) -> str:
-        """Загружает картинку для сообщений и возвращает вложение вида photo-1_2_key."""
+    async def _upload_file(self, peer_id: int, get_server: str, server_params: dict, field: str,
+                           data: bytes, filename: str, content_type: str, required: tuple[str, ...],
+                           attempts: int = 3, pause: float = 1.5) -> dict:
+        """Отправляет файл на сервер загрузки ВК. Сервер иногда отвечает пусто или ошибкой —
+        тогда берём новый адрес загрузки и пробуем ещё (с паузой). Понятная причина — в тексте ошибки."""
         import aiohttp
 
-        server = await self.call("photos.getMessagesUploadServer", peer_id=peer_id)
-        session = await self._http()
-        form = aiohttp.FormData()
+        last = "нет ответа"
+        for attempt in range(1, attempts + 1):
+            try:
+                server = await self.call(get_server, peer_id=peer_id, **server_params)
+                form = aiohttp.FormData()
+                form.add_field(field, data, filename=filename, content_type=content_type)
+                session = await self._http()
+                async with session.post(server["upload_url"], data=form) as resp:
+                    body = await resp.text()
+                    status = resp.status
+                try:
+                    uploaded = json.loads(body)
+                except ValueError:
+                    last = f"сервер загрузки ответил HTTP {status}, не JSON: {body[:150]!r}"
+                else:
+                    missing = [k for k in required if not uploaded.get(k) or uploaded.get(k) == "[]"]
+                    if not missing:
+                        return uploaded
+                    last = f"HTTP {status}, в ответе нет {missing}: {body[:150]!r} (файл не принят?)"
+            except VkApiError:
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last = f"сеть: {type(exc).__name__}: {exc}"
+            if attempt < attempts:
+                logger.warning("ВК: загрузка файла, попытка %d из %d не удалась (%s)", attempt, attempts, last)
+                await asyncio.sleep(pause * attempt)
+        raise RuntimeError(f"не удалось загрузить файл в ВК после {attempts} попыток: {last}")
+
+    async def upload_message_photo(self, peer_id: int, path) -> str:
+        """Загружает картинку для сообщений и возвращает вложение вида photo-1_2_key."""
         with open(path, "rb") as f:
-            form.add_field("photo", f.read(), filename="catalog.jpg", content_type="image/jpeg")
-        async with session.post(server["upload_url"], data=form) as resp:
-            uploaded = await resp.json(content_type=None)
+            data = f.read()
+        uploaded = await self._upload_file(peer_id, "photos.getMessagesUploadServer", {}, "photo", data,
+                                           "catalog.jpg", "image/jpeg", ("photo", "server", "hash"))
         saved = await self.call("photos.saveMessagesPhoto", photo=uploaded["photo"],
                                 server=uploaded["server"], hash=uploaded["hash"])
         photo = saved[0]
@@ -90,15 +120,9 @@ class VkApi:
         """Загружает файл (например, таблицу Excel) для отправки в сообщении и возвращает вложение вида doc1_2."""
         from pathlib import Path
 
-        import aiohttp
-
         path = Path(path)
-        server = await self.call("docs.getMessagesUploadServer", type="doc", peer_id=peer_id)
-        session = await self._http()
-        form = aiohttp.FormData()
-        form.add_field("file", path.read_bytes(), filename=path.name, content_type="application/octet-stream")
-        async with session.post(server["upload_url"], data=form) as resp:
-            uploaded = await resp.json(content_type=None)
+        uploaded = await self._upload_file(peer_id, "docs.getMessagesUploadServer", {"type": "doc"}, "file",
+                                           path.read_bytes(), path.name, "application/octet-stream", ("file",))
         saved = await self.call("docs.save", file=uploaded["file"], title=title or path.name)
         doc = saved["doc"] if isinstance(saved, dict) and "doc" in saved else saved[0]
         return f"doc{doc['owner_id']}_{doc['id']}"

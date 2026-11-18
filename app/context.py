@@ -13,10 +13,12 @@ from app.config import Settings
 from app.core.holidays import Holiday
 from app.core.knowledge import build_knowledge, load_faq
 from app.core.orders import Catalog
+from app.core.promo import PromoBook
 from app.messenger import Messenger
 from app.services.db import Database
 from app.services.llm import LLMClient
 from app.services.orders import OrderService
+from app.services.promo import PromoService
 from app.services.weather import WeatherService
 
 
@@ -30,6 +32,7 @@ class AppContext:
     holidays: list[Holiday]
     orders: OrderService
     messenger: Messenger
+    promos: PromoService
 
     @property
     def bot_username(self) -> str:
@@ -62,6 +65,7 @@ def build_context(settings: Settings) -> AppContext:
     catalog = Catalog.load(settings.catalog_path)
     llm = LLMClient(settings.llm_providers, settings.llm_system_prompt)
     llm.knowledge = build_knowledge(catalog, load_faq(settings.faq_path or settings.catalog_path.with_name("faq.txt")))
+    promos = PromoService(db, PromoBook.load(settings.catalog_path.with_name("promo.json")))
     return AppContext(
         settings=settings,
         db=db,
@@ -69,6 +73,7 @@ def build_context(settings: Settings) -> AppContext:
         weather=WeatherService(settings.weather_locations, settings.timezone),
         catalog=catalog,
         holidays=load_holidays(settings.holidays_path),
-        orders=OrderService(db, catalog),
+        orders=OrderService(db, catalog, promos),
         messenger=Messenger(settings, db, catalog),
+        promos=promos,
     )

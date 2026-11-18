@@ -5,11 +5,11 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.core.orders import Catalog, CartLine, STATUSES, fmt_qty
+from app.core.orders import Catalog, CartLine, STATUSES, fmt_qty, step_label
 
 
 class Shop(CallbackData, prefix="shop"):
-    action: str          # cats | cat | prod | add | sub | cart | clear | checkout
+    action: str          # cats | cat | prod | add | sub | cart | clear | checkout | setw | promo
     value: str = ""
 
 
@@ -35,6 +35,7 @@ def categories_kb(catalog: Catalog) -> InlineKeyboardMarkup:
         if catalog.in_category(c.id):
             kb.button(text=c.title, callback_data=Shop(action="cat", value=c.id))
     kb.button(text="🛒 Корзина", callback_data=Shop(action="cart"))
+    kb.button(text="🎟 Промокод", callback_data=Shop(action="promo"))
     kb.adjust(1)
     return kb.as_markup()
 
@@ -50,17 +51,26 @@ def products_kb(catalog: Catalog, category_id: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def product_kb(product_id: str, category_id: str, in_cart: float, unit: str = "шт") -> InlineKeyboardMarkup:
+def product_kb(product_id: str, category_id: str, in_cart: float, unit: str = "шт",
+               step: str = "", can_type_weight: bool = False) -> InlineKeyboardMarkup:
+    """step — подпись шага на кнопках («100 г»); can_type_weight — показать «✏️ Ввести вес»."""
     kb = InlineKeyboardBuilder()
+    sizes = []
     if in_cart:
-        kb.button(text="➖", callback_data=Shop(action="sub", value=product_id))
+        kb.button(text=f"➖{' ' + step if step else ''}", callback_data=Shop(action="sub", value=product_id))
         kb.button(text=f"🛒 {fmt_qty(in_cart)} {unit}", callback_data=Shop(action="cart"))
-        kb.button(text="➕", callback_data=Shop(action="add", value=product_id))
+        kb.button(text=f"➕{' ' + step if step else ''}", callback_data=Shop(action="add", value=product_id))
+        sizes.append(3)
     else:
-        kb.button(text="➕ В корзину", callback_data=Shop(action="add", value=product_id))
+        kb.button(text="➕ В корзину" + (f" ({step})" if step else ""), callback_data=Shop(action="add", value=product_id))
+        sizes.append(1)
+    if can_type_weight:
+        kb.button(text="✏️ Ввести вес", callback_data=Shop(action="setw", value=product_id))
+        sizes.append(1)
     kb.button(text="⬅️ Назад", callback_data=Shop(action="cat", value=category_id))
     kb.button(text="🛒 Корзина", callback_data=Shop(action="cart"))
-    kb.adjust(3 if in_cart else 1, 2)
+    sizes.append(2)
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 
@@ -74,6 +84,8 @@ def cart_kb(lines: list[CartLine]) -> InlineKeyboardMarkup:
         kb.button(text="✅ Оформить заказ", callback_data=Shop(action="checkout"))
         kb.button(text="🗑 Очистить", callback_data=Shop(action="clear"))
         rows += [1, 1]
+    kb.button(text="🎟 Промокод", callback_data=Shop(action="promo"))
+    rows.append(1)
     kb.button(text="📋 Каталог", callback_data=Shop(action="cats"))
     rows.append(1)
     kb.adjust(*rows)

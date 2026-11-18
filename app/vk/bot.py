@@ -22,9 +22,12 @@ from app.core.faq_bot import FaqBot, Reply
 from app.core.knowledge import HANDOFF_FALLBACK, format_handoff, split_handoff
 from app.core.contacts import normalize_phone
 from app.core.stats import compute_stats, export_tables, format_stats, parse_days
+from app.core.promo import RETRY_STATUSES, promo_reply
 from app.core.xlsx import write_xlsx
+from app.services.orders import MAX_QTY
 from app.core.orders import STATUSES, OrderView, apply_weights, catalog_intro, checkout_comment_hint, fmt_qty, \
-    format_cart, format_order, format_product, format_weighing, money, order_has_weight, parse_weight, weight_indexes
+    format_cart, format_order, format_product, format_weighing, money, order_has_weight, parse_order_qty, parse_weight, \
+    weight_indexes, weight_prompt
 from app.services import weather_reports
 from app.services.llm import LLMError
 from app.vk import keyboards as kb
@@ -48,9 +51,11 @@ PHRASES = {
     "birthdays": {"birthdays", "bd", "дни рождения", "ближайшие дни рождения"},
     "id": {"id"},
     "orders": {"orders", "заказы"},
+    "promo": {"промокод", "промо код", "promo", "ввести промокод", "🎟 промокод"},
     "manager": {"менеджер", "связаться с менеджером", "позвать менеджера", "оператор", "живой человек"},
 }
-ARG_COMMANDS = {"mybd": "mybd", "др": "mybd", "bd_add": "bd_add", "bd_del": "bd_del"}
+ARG_COMMANDS = {"mybd": "mybd", "др": "mybd", "bd_add": "bd_add", "bd_del": "bd_del",
+                "promo": "promo", "промокод": "promo"}
 CHECKOUT_BUTTONS = {"no_comment", "use_name", "use_phone", "skip_bd", "no_phone", "w_same"}
 HANDOFF_DAILY_CAP = 5   # сколько раз в сутки один человек может передать вопрос менеджеру
 ADMIN_COMMANDS = {"test_morning", "test_evening", "test_bd", "bd_list", "bd_sync", "bd_add", "bd_del", "stats", "export"}
@@ -111,8 +116,11 @@ def resolve_command(text: str, payload: dict | None) -> tuple[str | None, str]:
     first_low = first.lower()
     if first_low in ARG_COMMANDS:
         cmd = ARG_COMMANDS[first_low]
+        if cmd == "promo":   # «промокод ABC» — команда; «промокод на скидку есть?» — обычный вопрос
+            if len(rest.split()) <= 1:
+                return cmd, rest.strip()
         # «др …» без слэша считаем командой, только если дальше дата или «удалить»
-        if slash or first_low != "др" or bd.parse_day_month(rest.strip()) or rest.strip().lower() == "удалить":
+        elif slash or first_low != "др" or bd.parse_day_month(rest.strip()) or rest.strip().lower() == "удалить":
             return cmd, rest.strip()
     if slash and first_low in ADMIN_COMMANDS | set(PHRASES):
         return first_low, rest.strip()
@@ -378,6 +386,13 @@ class VkBot:
             await self.send(user_id, text, kb.repeat_orders([o.id for o in orders]))
         elif cmd == "repeat":
             await self.repeat_order(user_id)
+        elif cmd == "promo":
+            if chat:
+                await self.send(peer_id, "🎟 Промокод вводится в личных сообщениях сообщества — напишите нам туда 🙂")
+            elif arg:
+                await self.redeem_promo(user_id, arg)
+            else:
+                await self.ask_promo(user_id)
         elif cmd == "mybd_help":
             await self.cmd_mybd_help(peer_id, user_id)
         elif cmd == "mybd":
@@ -522,6 +537,9 @@ class VkBot:
     # ── нейросеть ─────────────────────────────────────────────
     async def talk(self, peer_id: int, user_id: int, text: str, chat: bool) -> None:
         ctx = self.ctx
+        if not chat and ctx.promos.known(text):   # человек просто написал промокод с флаера
+            await self.redeem_promo(user_id, text)
+            return
         reply = self.faq.answer(text)   # сначала — готовые ответы: цены из каталога, оплата, сроки, доставка
         if reply is not None:
             await self.send_rule_reply(peer_id, user_id, text, reply, chat)
@@ -685,6 +703,9 @@ class VkBot:
         catalog = self.ctx.catalog
 
         link = None
+        if action not in {"setw", "promo", "q_cancel"} and \
+                str(self.checkout.get(user_id, {}).get("step", "")) in {"promo", "q_weight"}:
+            self.checkout.pop(user_id, None)   # нажал другую кнопку — ввод кода/веса больше не ждём
         if action == "ost":
             snackbar = await self.change_status(user_id, peer_id, cmid, payload)
         elif action == "dm_catalog":
@@ -708,6 +729,19 @@ class VkBot:
                 await self.show_product(user_id, value, cmid)
             else:
                 snackbar = "Товар не найден"
+        elif action == "setw":
+            product = catalog.product(value)
+            if product and product.by_weight:
+                self.checkout[user_id] = {"step": "q_weight", "product": value}
+                await self.send(user_id, weight_prompt(product), kb.input_cancel())
+            else:
+                snackbar = "Товар не найден"
+        elif action == "promo":
+            await self.ask_promo(user_id)
+        elif action == "q_cancel":
+            if str(self.checkout.get(user_id, {}).get("step", "")) in {"promo", "q_weight"}:
+                self.checkout.pop(user_id, None)
+            snackbar = "Отменено"
         elif action in {"add", "sub"}:
             qty = await self.ctx.orders.change(PLATFORM, user_id, value, 1 if action == "add" else -1)
             if qty is None:
@@ -786,8 +820,16 @@ class VkBot:
             if step.startswith("h_"):
                 self.handoff_q.pop(user_id, None)
                 await self.send(user_id, "Хорошо, не передаю. Если что — я на связи 🙂", kb.main_menu())
+            elif step in {"promo", "q_weight"}:
+                await self.send(user_id, "Хорошо, отменил 🙂", kb.main_menu())
             else:
                 await self.send(user_id, "Оформление отменено. Корзина сохранена 🛒", kb.main_menu())
+            return
+        if step == "promo":
+            await self.redeem_promo(user_id, text)
+            return
+        if step == "q_weight":
+            await self.weight_input_qty(user_id, text)
             return
         if step == "h_question":
             if len(text) < 3:
@@ -845,6 +887,38 @@ class VkBot:
             await self.birthday_input(user_id, text, cmd)
         else:
             await self.send(user_id, "Нажмите «✅ Подтвердить» или «❌ Отмена» под сообщением с заказом.", kb.confirm())
+
+    # ── промокод и ввод веса ──
+    async def ask_promo(self, user_id: int) -> None:
+        self.checkout[user_id] = {"step": "promo"}
+        await self.send(user_id, "🎟 Напишите промокод с флаера одним сообщением.", kb.input_cancel())
+
+    async def redeem_promo(self, user_id: int, raw: str) -> None:
+        """Ввод промокода: один код — один раз на человека; менеджерам уходит уведомление."""
+        result = await self.ctx.promos.redeem(PLATFORM, user_id, raw)
+        retry = result.status in RETRY_STATUSES
+        if retry:
+            self.checkout[user_id] = {"step": "promo"}   # даём попробовать ещё раз
+        else:
+            self.checkout.pop(user_id, None)
+        await self.send(user_id, promo_reply(result), kb.input_cancel() if retry else kb.main_menu())
+        if result.status == "ok":
+            u = await self.user(user_id)
+            await self.ctx.messenger.notify_promo(PLATFORM, user_id, await self.full_name(user_id),
+                                                  u.get("screen_name"), result.promo)
+
+    async def weight_input_qty(self, user_id: int, text: str) -> None:
+        product = self.ctx.catalog.product(self.checkout[user_id].get("product", ""))
+        if not product:
+            self.checkout.pop(user_id, None)
+            return
+        qty, error = parse_order_qty(text, product, MAX_QTY.get(product.unit, 99))
+        if qty is None:
+            await self.send(user_id, error, kb.input_cancel())
+            return
+        self.checkout.pop(user_id, None)
+        await self.ctx.orders.set_qty(PLATFORM, user_id, product.id, qty)
+        await self.show_product(user_id, product.id, None)
 
     async def finish_checkout(self, user_id: int) -> None:
         state = self.checkout.pop(user_id, None)

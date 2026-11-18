@@ -6,7 +6,7 @@ import re
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
@@ -14,8 +14,10 @@ from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemo
 from app import keyboards as kb
 from app.context import AppContext
 from app.core.contacts import normalize_phone
-from app.core.orders import STATUSES, catalog_intro, checkout_comment_hint, format_cart, format_order, \
-    format_product
+from app.core.orders import STATUSES, catalog_intro, checkout_comment_hint, fine_weight, format_cart, format_order, \
+    format_product, parse_order_qty, step_label, weight_prompt
+from app.core.promo import RETRY_STATUSES, promo_reply
+from app.services.orders import MAX_QTY
 
 logger = logging.getLogger(__name__)
 router = Router(name="orders")
@@ -28,6 +30,35 @@ class Checkout(StatesGroup):
     phone = State()
     comment = State()
     confirm = State()
+
+
+class Weight(StatesGroup):
+    value = State()    # покупатель пишет вес товара числом
+
+
+class PromoInput(StatesGroup):
+    code = State()     # покупатель пишет промокод
+
+
+_INPUT_STATES = (Weight.value.state, PromoInput.code.state)
+
+
+async def _drop_input_state(state: FSMContext) -> None:
+    """Ввод веса/промокода больше не ждём (человек ушёл в другую команду или кнопку)."""
+    if await state.get_state() in _INPUT_STATES:
+        await state.clear()
+
+
+async def redeem_promo_tg(message: Message, ctx: AppContext, raw: str) -> bool:
+    """Проверяет и записывает промокод, отвечает покупателю, уведомляет менеджеров.
+    True — код не подошёл, можно сразу ввести другой."""
+    user = message.from_user
+    result = await ctx.promos.redeem(PLATFORM, user.id, raw)
+    retry = result.status in RETRY_STATUSES
+    await message.answer(promo_reply(result) + ("\n\n/cancel — отмена" if retry else ""))
+    if result.status == "ok":
+        await ctx.messenger.notify_promo(PLATFORM, user.id, user.full_name, user.username, result.promo)
+    return retry
 
 
 async def send_catalog_photo(message: Message, ctx: AppContext) -> None:
@@ -55,7 +86,8 @@ async def show_catalog(message: Message, ctx: AppContext) -> None:
 
 
 @router.message(Command("catalog", "order", "zakaz"))
-async def catalog_cmd(message: Message, ctx: AppContext) -> None:
+async def catalog_cmd(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await _drop_input_state(state)
     if message.chat.type != "private":
         # В группе корзины не собираем — показываем прайс и зовём в личку.
         await send_catalog_photo(message, ctx)
@@ -81,8 +113,10 @@ async def _cart_view(user_id: int, ctx: AppContext):
 async def _product_view(user_id: int, product_id: str, ctx: AppContext):
     product = ctx.catalog.product(product_id)
     qty = await ctx.orders.qty(PLATFORM, user_id, product_id)
+    fine = fine_weight(product)
     return (format_product(product, ctx.catalog.currency, qty),
-            kb.product_kb(product.id, product.category, qty, product.unit))
+            kb.product_kb(product.id, product.category, qty, product.unit,
+                          step_label(product) if fine else "", fine))
 
 
 @router.callback_query(kb.Shop.filter())
@@ -90,6 +124,7 @@ async def shop_callback(call: CallbackQuery, callback_data: kb.Shop, ctx: AppCon
     user_id = call.from_user.id
     action, value = callback_data.action, callback_data.value
     catalog = ctx.catalog
+    await _drop_input_state(state)
 
     if action == "cats":
         await _edit(call, catalog_intro(catalog), kb.categories_kb(catalog))
@@ -114,6 +149,17 @@ async def shop_callback(call: CallbackQuery, callback_data: kb.Shop, ctx: AppCon
         else:
             await _edit(call, *await _product_view(user_id, value, ctx))
         return
+    elif action == "setw":
+        product = catalog.product(value)
+        if not product or not product.by_weight:
+            await call.answer("Товар не найден", show_alert=True)
+            return
+        await state.set_state(Weight.value)
+        await state.update_data(product_id=product.id)
+        await call.message.answer(weight_prompt(product) + "\n\n/cancel — отмена")
+    elif action == "promo":
+        await state.set_state(PromoInput.code)
+        await call.message.answer("🎟 Напишите промокод с флаера одним сообщением.\n\n/cancel — отмена")
     elif action == "cart":
         await _edit(call, *await _cart_view(user_id, ctx))
     elif action == "clear":
@@ -130,7 +176,8 @@ async def shop_callback(call: CallbackQuery, callback_data: kb.Shop, ctx: AppCon
 
 
 @router.message(Command("cart"), F.chat.type == "private")
-async def cart_cmd(message: Message, ctx: AppContext) -> None:
+async def cart_cmd(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await _drop_input_state(state)
     text, markup = await _cart_view(message.from_user.id, ctx)
     await message.answer(text, reply_markup=markup)
 
@@ -140,6 +187,52 @@ async def cart_cmd(message: Message, ctx: AppContext) -> None:
 async def checkout_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Оформление отменено. Корзина сохранена — /cart", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(Command("cancel"), StateFilter(Weight, PromoInput))
+async def input_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Хорошо, отменил 🙂")
+
+
+@router.message(Weight.value, F.text, ~F.text.startswith("/"))
+async def weight_input(message: Message, state: FSMContext, ctx: AppContext) -> None:
+    data = await state.get_data()
+    product = ctx.catalog.product(data.get("product_id", ""))
+    if not product:
+        await state.clear()
+        return
+    qty, error = parse_order_qty(message.text, product, MAX_QTY.get(product.unit, 99))
+    if qty is None:
+        await message.answer(error + "\n\n/cancel — отмена")
+        return
+    await state.clear()
+    await ctx.orders.set_qty(PLATFORM, message.from_user.id, product.id, qty)
+    text, markup = await _product_view(message.from_user.id, product.id, ctx)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(Command("promo", "promocode"), F.chat.type == "private")
+async def promo_cmd(message: Message, command: CommandObject, state: FSMContext, ctx: AppContext) -> None:
+    await _drop_input_state(state)
+    raw = (command.args or "").strip()
+    if raw:
+        if await redeem_promo_tg(message, ctx, raw):
+            await state.set_state(PromoInput.code)
+        return
+    await state.set_state(PromoInput.code)
+    await message.answer("🎟 Напишите промокод с флаера одним сообщением.\n\n/cancel — отмена")
+
+
+@router.message(Command("promo", "promocode"))
+async def promo_in_group(message: Message) -> None:
+    await message.reply("🎟 Промокод вводится в личных сообщениях со мной.")
+
+
+@router.message(PromoInput.code, F.text, ~F.text.startswith("/"))
+async def promo_input(message: Message, state: FSMContext, ctx: AppContext) -> None:
+    if not await redeem_promo_tg(message, ctx, message.text):
+        await state.clear()
 
 
 @router.message(Checkout.phone)

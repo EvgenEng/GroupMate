@@ -61,7 +61,16 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at TEXT NOT NULL,
     final_json TEXT,
     final_total REAL,
-    done_at REAL
+    done_at REAL,
+    promo TEXT
+);
+CREATE TABLE IF NOT EXISTS promo_uses (
+    code TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    used_at TEXT NOT NULL,
+    order_id INTEGER,
+    PRIMARY KEY (code, platform, user_id)
 );
 CREATE TABLE IF NOT EXISTS reviews (
     order_id INTEGER PRIMARY KEY,
@@ -155,6 +164,8 @@ class Database:
             self._conn.execute("ALTER TABLE orders ADD COLUMN final_total REAL")
         if existing and "done_at" not in existing:      # когда заказ выдан — для просьбы об отзыве
             self._conn.execute("ALTER TABLE orders ADD COLUMN done_at REAL")
+        if existing and "promo" not in existing:        # промокод, применённый к заказу
+            self._conn.execute("ALTER TABLE orders ADD COLUMN promo TEXT")
         cart_cols = self._columns("cart")
         if cart_cols and "updated_at" not in cart_cols:  # когда корзину трогали в последний раз — для напоминаний
             self._conn.execute("ALTER TABLE cart ADD COLUMN updated_at REAL")
@@ -280,12 +291,12 @@ class Database:
     # ── заказы ─────────────────────────────────────────────
     async def create_order(self, platform: str, user_id: int, customer_name: str, username: str | None,
                            phone: str, comment: str, items: list[tuple[str, float, float, str]],
-                           total: float) -> int:
+                           total: float, promo: str = "") -> int:
         return await self._a(
             "INSERT INTO orders(platform, user_id, customer_name, username, phone, comment, items_json, "
-            "total, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "total, status, created_at, promo) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (platform, user_id, customer_name, username, phone, comment,
-             json.dumps(items, ensure_ascii=False), total, "new", datetime.now().strftime("%d.%m.%Y %H:%M")))
+             json.dumps(items, ensure_ascii=False), total, "new", datetime.now().strftime("%d.%m.%Y %H:%M"), promo))
 
     @staticmethod
     def _order(row) -> OrderView:
@@ -295,7 +306,7 @@ class Database:
                          items=[tuple(x) for x in json.loads(row["items_json"])], total=row["total"],
                          status=row["status"], created_at=row["created_at"], platform=row["platform"],
                          final_items=[tuple(x) for x in json.loads(final)] if final else None,
-                         final_total=row["final_total"])
+                         final_total=row["final_total"], promo=row["promo"] or "")
 
     async def order(self, order_id: int) -> OrderView | None:
         row = await self._a("SELECT * FROM orders WHERE id=?", (order_id,), "one")
@@ -305,6 +316,12 @@ class Database:
         rows = await self._a("SELECT * FROM orders WHERE platform=? AND user_id=? ORDER BY id DESC LIMIT ?",
                              (platform, user_id, limit), "all")
         return [self._order(r) for r in rows]
+
+    async def has_orders(self, platform: str, user_id: int) -> bool:
+        """Есть ли у человека заказы (отменённые не считаем) — для промокодов «только на первый заказ»."""
+        row = await self._a("SELECT 1 FROM orders WHERE platform=? AND user_id=? AND status!='cancelled' LIMIT 1",
+                            (platform, user_id), "one")
+        return row is not None
 
     async def recent_orders(self, limit: int = 10, only_open: bool = True) -> list[OrderView]:
         where = "WHERE status IN ('new','accepted','ready')" if only_open else ""
@@ -324,6 +341,34 @@ class Database:
         rows = await self._a("SELECT * FROM orders WHERE platform=? AND status='done' AND done_at IS NOT NULL "
                              "AND done_at<=? AND done_at>=? ORDER BY id", (platform, done_before, done_after), "all")
         return [self._order(r) for r in rows]
+
+    # ── промокоды ──────────────────────────────────────────
+    async def promo_activate(self, code: str, platform: str, user_id: int) -> bool:
+        """Записывает ввод промокода. False — этот человек уже вводил этот код (PRIMARY KEY не даст дубль)."""
+        try:
+            await self._a("INSERT INTO promo_uses(code, platform, user_id, used_at) VALUES(?,?,?,?)",
+                          (code, platform, user_id, datetime.now().strftime("%d.%m.%Y %H:%M")))
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    async def promo_pending(self, platform: str, user_id: int) -> list[str]:
+        """Коды, введённые человеком и ещё не привязанные к заказу."""
+        rows = await self._a("SELECT code FROM promo_uses WHERE platform=? AND user_id=? AND order_id IS NULL "
+                             "ORDER BY used_at", (platform, user_id), "all")
+        return [r["code"] for r in rows]
+
+    async def promo_attach(self, platform: str, user_id: int, order_id: int) -> None:
+        await self._a("UPDATE promo_uses SET order_id=? WHERE platform=? AND user_id=? AND order_id IS NULL",
+                      (order_id, platform, user_id))
+
+    async def promo_fails(self, platform: str, user_id: int, day: str) -> int:
+        data = await self.kv_get(f"promo_fail:{platform}:{user_id}", {}) or {}
+        return int(data.get("n", 0)) if data.get("day") == day else 0
+
+    async def promo_fail_hit(self, platform: str, user_id: int, day: str) -> None:
+        n = await self.promo_fails(platform, user_id, day)
+        await self.kv_set(f"promo_fail:{platform}:{user_id}", {"day": day, "n": n + 1})
 
     # ── оценки заказов ─────────────────────────────────────
     async def add_review(self, order_id: int, platform: str, user_id: int, rating: int) -> bool:

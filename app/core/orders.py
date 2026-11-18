@@ -29,7 +29,7 @@ class Product:
     unit: str = "шт"
     description: str = ""
     available: bool = True
-    step: float = 1.0  # шаг заказа: 1 шт, 0.5 кг и т.п.
+    step: float = 1.0  # шаг заказа: 1 шт, 0.1 кг (100 г) и т.п.
 
     @property
     def by_weight(self) -> bool:
@@ -164,11 +164,49 @@ def format_cart(lines: list[CartLine], currency: str) -> str:
     return "\n".join(rows)
 
 
+def step_label(p: Product) -> str:
+    """Шаг заказа для кнопок: «100 г», «1 шт»."""
+    if p.unit == "кг" and p.step < 1:
+        return f"{fmt_qty(round(p.step * 1000))} г"
+    return f"{fmt_qty(p.step)} {p.unit}"
+
+
+def fine_weight(p: Product) -> bool:
+    """Весовой товар с шагом меньше килограмма — вес можно вводить числом (300, 1,2 кг)."""
+    return p.by_weight and p.step < 1
+
+
+def weight_prompt(p: Product) -> str:
+    return (f"✏️ <b>{escape(p.name)}</b>\n\n"
+            f"Напишите нужный вес — кратно {step_label(p)}: например 300, 700 г или 1,2 кг.\n"
+            "Чтобы убрать товар из корзины, напишите 0.")
+
+
+def parse_order_qty(text: str, p: Product, max_qty: float = 20) -> tuple[float | None, str]:
+    """Вес, который написал покупатель → (количество в единицах товара, \"\") или (None, что не так).
+
+    Принимает «300», «300 г», «0,3», «1 кг», «1,2 кг», «1000». Без единиц: меньше 10 — килограммы,
+    10 и больше — граммы. Вес должен быть кратен шагу товара (100 г). 0 — убрать из корзины."""
+    hint = f"Напишите вес кратно {step_label(p)}: например 300, 700 г или 1,2 кг."
+    qty = parse_weight(text, p.unit)
+    if qty is None:
+        return None, "Не разобрал вес 🤔 " + hint
+    steps = qty / p.step
+    if abs(steps - round(steps)) > 1e-6:
+        return None, f"Вес {fmt_qty(qty)} {p.unit} не кратен {step_label(p)}. " + hint
+    if qty > max_qty + 1e-9:
+        return None, f"Это слишком много: на одну позицию — не больше {fmt_qty(max_qty)} {p.unit}. Для большего объёма напишите менеджеру."
+    return round(qty, 3), ""
+
+
 def format_product(p: Product, currency: str, in_cart: float = 0) -> str:
     rows = [f"<b>{escape(p.name)}</b>", f"💰 {money(p.price, currency)} / {escape(p.unit)}"]
     if p.description:
         rows += ["", escape(p.description)]
-    if p.by_weight:
+    if fine_weight(p):
+        rows += ["", f"⚖️ Вес — кратно {step_label(p)}: кнопками ➕/➖ или «✏️ Ввести вес» "
+                     "(например 300, 700 г, 1,2 кг). Сумма примерная — окончательную назовёт менеджер после сборки заказа."]
+    elif p.by_weight:
         rows += ["", f"⚖️ Заказ кратно {fmt_qty(p.step)} {escape(p.unit)}. Вес примерный — сумма по факту."]
     if in_cart:
         rows += ["", f"🛒 В корзине: {fmt_qty(in_cart)} {escape(p.unit)} ≈ {money(in_cart * p.price, currency)}"]
@@ -206,6 +244,7 @@ class OrderView:
     platform: str = "tg"
     final_items: list[tuple[str, float, float, str]] | None = None   # позиции с фактическим весом (после взвешивания)
     final_total: float | None = None                                # итог по факту
+    promo: str = ""                                                 # промокод(ы), введённые покупателем до заказа
 
 
 def customer_link(platform: str, user_id: int, name: str, username: str | None = None) -> str:
@@ -233,6 +272,8 @@ def format_order(o: OrderView, currency: str, for_owner: bool = False) -> str:
                  f"📞 {escape(o.phone)}"]
     if o.comment:
         rows.append(f"💬 {escape(o.comment)}")
+    if o.promo:
+        rows.append(f"🏷 Промокод: {escape(o.promo)}")
     rows.append(f"🕒 {escape(o.created_at)}")
     return "\n".join(rows)
 
@@ -255,6 +296,8 @@ def format_manager_order(o: OrderView, currency: str, birthday: str | None = Non
     rows += ["", money_row, "",
              f"👤 {customer_link(o.platform, o.user_id, o.customer_name, o.username)}",
              f"📞 {escape(o.phone)}"]
+    if o.promo:
+        rows.append(f"🏷 <b>Промокод: {escape(o.promo)}</b>")
     if birthday:
         rows.append(f"🎂 День рождения: {escape(birthday)}")
     if o.comment:

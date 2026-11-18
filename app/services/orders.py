@@ -8,9 +8,10 @@ MAX_QTY = {"кг": 20, "г": 5000}  # разумный предел на одн�
 
 
 class OrderService:
-    def __init__(self, db: Database, catalog: Catalog):
+    def __init__(self, db: Database, catalog: Catalog, promos=None):
         self.db = db
         self.catalog = catalog
+        self.promos = promos   # PromoService | None
 
     async def lines(self, platform: str, user_id: int) -> list[CartLine]:
         return build_lines(await self.db.cart(platform, user_id), self.catalog)
@@ -26,6 +27,15 @@ class OrderService:
         return await self.db.cart_change(platform, user_id, product_id, direction * product.step,
                                          max_qty=MAX_QTY.get(product.unit, 99))
 
+    async def set_qty(self, platform: str, user_id: int, product_id: str, qty: float) -> float | None:
+        """Ставит точное количество (вес, который ввёл покупатель). 0 — убрать из корзины. None — товара нет."""
+        product = self.catalog.product(product_id)
+        if not product:
+            return None
+        current = await self.qty(platform, user_id, product_id)
+        return await self.db.cart_change(platform, user_id, product_id, qty - current,
+                                         max_qty=MAX_QTY.get(product.unit, 99))
+
     async def clear(self, platform: str, user_id: int) -> None:
         await self.db.cart_clear(platform, user_id)
 
@@ -35,8 +45,12 @@ class OrderService:
         if not lines:
             return None
         items = [(l.product.name, l.qty, l.product.price, l.product.unit) for l in lines]
+        keys = await self.db.promo_pending(platform, user_id)
+        promo = ", ".join(self.promos.label(k) if self.promos else k for k in keys)
         order_id = await self.db.create_order(platform, user_id, name, username, phone, comment,
-                                              items, cart_total(lines))
+                                              items, cart_total(lines), promo)
+        if keys:
+            await self.db.promo_attach(platform, user_id, order_id)
         await self.db.cart_clear(platform, user_id)
         return await self.db.order(order_id)
 

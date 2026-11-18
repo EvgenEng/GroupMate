@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from app.core.orders import Catalog, CartLine, STATUSES, fmt_qty
+from app.core.orders import Catalog, CartLine, STATUSES, fine_weight, fmt_qty, step_label
 
 LABEL_MAX = 40
 PAGE_SIZE = 4
@@ -58,12 +58,13 @@ MENU_COMMANDS = {
     "ℹ️ Помощь": "help",
     "👤 Связаться с менеджером": "manager",
     "🔁 Повторить заказ": "repeat",
+    "🎟 Промокод": "promo",
 }
 
 
 def main_menu() -> dict:
     labels = list(MENU_COMMANDS)
-    rows = [labels[0:2], labels[2:4], labels[4:6], labels[6:8]]
+    rows = [labels[0:2], labels[2:4], labels[4:6], labels[6:8], labels[8:10]]
     return {"one_time": False, "buttons": [
         [text(label, {"cmd": MENU_COMMANDS[label]}, "primary" if MENU_COMMANDS[label] == "catalog" else None)
          for label in row] for row in rows]}
@@ -73,7 +74,7 @@ def main_menu() -> dict:
 def categories(catalog: Catalog) -> dict:
     cats = catalog.visible_categories()[:INLINE_MAX_ROWS - 1]
     rows = [[callback(c.title, {"a": "cat", "v": c.id, "p": 0})] for c in cats]
-    rows.append([callback("🛒 Корзина", {"a": "cart"})])
+    rows.append([callback("🛒 Корзина", {"a": "cart"}), callback("🎟 Промокод", {"a": "promo"})])
     return inline(rows)
 
 
@@ -96,13 +97,19 @@ def products(catalog: Catalog, category_id: str, page: int) -> dict:
 def product(catalog: Catalog, product_id: str, qty: float) -> dict:
     p = catalog.product(product_id)
     back = {"a": "cat", "v": p.category, "p": page_of(catalog, product_id)} if p else {"a": "cats"}
+    fine = bool(p) and fine_weight(p)
+    step = f" {step_label(p)}" if fine else ""
     if qty:
-        first = [callback("➖", {"a": "sub", "v": product_id}),
+        first = [callback(f"➖{step}", {"a": "sub", "v": product_id}),
                  callback(f"🛒 {fmt_qty(qty)} {p.unit}", {"a": "cart"}, "positive"),
-                 callback("➕", {"a": "add", "v": product_id})]
+                 callback(f"➕{step}", {"a": "add", "v": product_id})]
     else:
-        first = [callback("➕ В корзину", {"a": "add", "v": product_id}, "positive")]
-    return inline([first, [callback("⬅️ Назад", back), callback("🛒 Корзина", {"a": "cart"})]])
+        first = [callback("➕ В корзину" + (f" ({step.strip()})" if fine else ""), {"a": "add", "v": product_id}, "positive")]
+    rows = [first]
+    if fine:
+        rows.append([callback("✏️ Ввести вес", {"a": "setw", "v": product_id})])
+    rows.append([callback("⬅️ Назад", back), callback("🛒 Корзина", {"a": "cart"})])
+    return inline(rows)
 
 
 def page_of(catalog: Catalog, product_id: str) -> int:
@@ -148,6 +155,11 @@ def name_choice(suggested: str = "") -> dict:
     rows = [[text(f"✅ {suggested}", {"cmd": "use_name"}, "positive")]] if suggested else []
     rows.append([callback("❌ Отменить оформление", CANCEL_CHECKOUT, "negative")])
     return inline(rows)
+
+
+def input_cancel() -> dict:
+    """Под вопросом «введите промокод / вес»."""
+    return inline([[callback("❌ Отмена", {"a": "q_cancel"}, "negative")]])
 
 
 def birthday_skip() -> dict:

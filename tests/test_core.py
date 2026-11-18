@@ -196,7 +196,7 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(len(self.catalog.products), 25)
         self.assertEqual([c.id for c in self.catalog.visible_categories()], ["deli", "sausage", "sets"])
         neck = self.catalog.product("neck")
-        self.assertEqual((neck.price, neck.unit, neck.step), (1700, "кг", 0.5))
+        self.assertEqual((neck.price, neck.unit, neck.step), (1700, "кг", 0.1))
         self.assertIn("3 до 7 дней", od.catalog_intro(self.catalog))
 
     def test_cart_by_weight_and_pieces(self):

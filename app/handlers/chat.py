@@ -14,6 +14,7 @@ from aiogram.types import Message
 
 from app.context import AppContext
 from app.core.knowledge import HANDOFF_FALLBACK, format_handoff, split_handoff
+from app.handlers.orders import redeem_promo_tg
 from app.services.llm import LLMError
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,9 @@ def _addressed_to_bot(message: Message, ctx: AppContext) -> str | None:
 async def talk(message: Message, ctx: AppContext, bot: Bot) -> None:
     question = _addressed_to_bot(message, ctx)
     if question is None:
+        return
+    if message.chat.type == "private" and ctx.promos.known(question):   # просто написал промокод с флаера
+        await redeem_promo_tg(message, ctx, question)
         return
     if not ctx.llm.enabled:
         if message.chat.type == "private":

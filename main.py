@@ -42,6 +42,7 @@ async def run_telegram(ctx: AppContext) -> None:
         BotCommand(command="weather", description="🌤 Погода на сегодня"),
         BotCommand(command="catalog", description="🛍 Каталог и заказ"),
         BotCommand(command="cart", description="🛒 Корзина"),
+        BotCommand(command="promo", description="🎟 Ввести промокод"),
         BotCommand(command="myorders", description="🧾 Мои заказы"),
         BotCommand(command="mybd", description="🎂 Записать свой день рождения"),
         BotCommand(command="birthdays", description="🎉 Ближайшие дни рождения"),

@@ -145,9 +145,9 @@ class VkScenarioTests(VkTestCase):
             message(CUSTOMER, CUSTOMER, "каталог"),
             event(CUSTOMER, {"a": "cat", "v": "deli", "p": 1}),
             event(CUSTOMER, {"a": "prod", "v": "neck"}),
-            event(CUSTOMER, {"a": "add", "v": "neck"}),
-            event(CUSTOMER, {"a": "add", "v": "neck"}),
-            event(CUSTOMER, {"a": "add", "v": "neck"}),
+            event(CUSTOMER, {"a": "add", "v": "neck"}),                           # шаг — 100 г
+            event(CUSTOMER, {"a": "setw", "v": "neck"}),                          # дальше вес пишем числом
+            message(CUSTOMER, CUSTOMER, "1,5 кг"),
             event(CUSTOMER, {"a": "prod", "v": "set-intro"}),
             event(CUSTOMER, {"a": "add", "v": "set-intro"}),
             event(CUSTOMER, {"a": "cart"}),
@@ -159,7 +159,7 @@ class VkScenarioTests(VkTestCase):
             message(CUSTOMER, CUSTOMER, "Без комментария", {"cmd": "no_comment"}),
             event(CUSTOMER, {"a": "co_ok"}),
         )
-        self.assertIn("В корзине: 1,5 кг", self.api.snackbars)
+        self.assertIn("В корзине: 0,1 кг", self.api.snackbars)
         self.assertIn("В корзине: 1 шт", self.api.snackbars)
         cart_edit = [t for _, _, t, _ in self.api.edits if t.startswith("🛒 Ваша корзина")][-1]
         self.assertIn("Шейка классическая в/к — 1,5 кг", cart_edit)
@@ -226,7 +226,7 @@ class VkScenarioTests(VkTestCase):
                      message(CUSTOMER, CUSTOMER, "🌤 Погода", {"cmd": "weather"}))
         self.assertNotIn(CUSTOMER, self.bot.checkout)
         self.assertTrue(any("Погода на сегодня" in t for t in self.api.texts_to(CUSTOMER)))
-        self.assertEqual(asyncio.run(self.ctx.db.cart("vk", CUSTOMER)), {"neck": 0.5})
+        self.assertEqual(asyncio.run(self.ctx.db.cart("vk", CUSTOMER)), {"neck": 0.1})
 
     def test_chat_welcome_and_commands(self):
         self.run_all(

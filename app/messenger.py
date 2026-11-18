@@ -8,11 +8,13 @@ Telegram-клавиатуры импортируются внутри функц
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from html import escape
 
 from app.config import Settings
 from app.core.birthdays import order_on_birthday
-from app.core.orders import (Catalog, OrderView, STATUS_FOR_CUSTOMER, build_lines, cart_total, fmt_qty,
+from app.core.promo import PromoCode, format_promo_notice
+from app.core.orders import (Catalog, PLATFORM_NAMES, customer_link, OrderView, STATUS_FOR_CUSTOMER, build_lines, cart_total, fmt_qty,
                              format_final_message, format_manager_order, has_weight_items, money, order_has_weight)
 from app.services.db import Database
 from app.vk import keyboards as vk_kb
@@ -198,6 +200,25 @@ class Messenger:
             delivered += await self._vk_send(uid, html)
         if not delivered:
             logger.error("Вопрос покупателя некому передать: ни один менеджер не получил сообщение!")
+        return delivered
+
+    async def notify_promo(self, platform: str, user_id: int, name: str, username: str | None,
+                           promo: PromoCode) -> int:
+        """Менеджерам: покупатель ввёл промокод. Возвращает, скольким дошло."""
+        text = format_promo_notice(PLATFORM_NAMES.get(platform, platform),
+                                   customer_link(platform, user_id, name, username),
+                                   promo.code, promo.description, datetime.now().strftime("%d.%m.%Y %H:%M"))
+        delivered = await self.notify_handoff_quiet(text)
+        if not delivered:
+            logger.error("Промокод %s (%s %s): ни один менеджер не получил уведомление!", promo.code, platform, user_id)
+        return delivered
+
+    async def notify_handoff_quiet(self, html: str) -> int:
+        delivered = 0
+        for uid in await self.tg_manager_ids():
+            delivered += await self._tg_send(uid, html)
+        for uid in await self.vk_manager_ids():
+            delivered += await self._vk_send(uid, html)
         return delivered
 
     async def notify_market_order(self, html: str) -> None:

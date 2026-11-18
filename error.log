@@ -1,0 +1,58 @@
+2026-11-18 09:37:35,973 [INFO] main: Нейросеть: выключена. Товаров в каталоге: 25.
+Traceback (most recent call last):
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\zoneinfo\_common.py", line 12, in load_tzdata
+    return resources.files(package_name).joinpath(resource_name).open("rb")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\importlib\resources\_common.py", line 46, in wrapper
+    return func(anchor)
+           ^^^^^^^^^^^^
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\importlib\resources\_common.py", line 56, in files
+    return from_package(resolve(anchor))
+                        ^^^^^^^^^^^^^^^
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\functools.py", line 912, in wrapper
+    return dispatch(args[0].__class__)(*args, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\importlib\resources\_common.py", line 82, in _
+    return importlib.import_module(cand)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1310, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1310, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'tzdata'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Projects\GroupMate\main.py", line 109, in <module>
+    main()
+  File "C:\Projects\GroupMate\main.py", line 103, in main
+    asyncio.run(run())
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\asyncio\base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Projects\GroupMate\main.py", line 84, in run
+    scheduler = Scheduler(settings.timezone)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Projects\GroupMate\app\scheduler.py", line 29, in __init__
+    self.tz = ZoneInfo(timezone)
+              ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Макс\AppData\Local\Programs\Python\Python312\Lib\zoneinfo\_common.py", line 24, in load_tzdata
+    raise ZoneInfoNotFoundError(f"No time zone found with key {key}")
+zoneinfo._common.ZoneInfoNotFoundError: 'No time zone found with key Europe/Moscow'
