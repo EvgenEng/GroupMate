@@ -1,8 +1,12 @@
 """Логика заказов, общая для Telegram и ВКонтакте: корзина, оформление, статусы."""
 from __future__ import annotations
 
+import logging
+
 from app.core.orders import Catalog, CartLine, OrderView, build_lines, cart_total, items_total, match_repeat
 from app.services.db import Database
+
+logger = logging.getLogger(__name__)
 
 MAX_QTY = {"кг": 20, "г": 5000}  # разумный предел на одну позицию
 
@@ -52,6 +56,8 @@ class OrderService:
         if keys:
             await self.db.promo_attach(platform, user_id, order_id)
         await self.db.cart_clear(platform, user_id)
+        logger.info("Заказ №%s оформлен (%s): позиций %d, сумма %s%s", order_id, platform, len(items),
+                    f"{cart_total(lines):g}", f", промокод: {promo}" if promo else "")
         return await self.db.order(order_id)
 
     async def repeat(self, platform: str, user_id: int,
@@ -80,6 +86,7 @@ class OrderService:
         if not await self.db.order(order_id):
             return None
         await self.db.set_order_final(order_id, final_items, items_total(final_items))
+        logger.info("Заказ №%s: итог после взвешивания %s", order_id, f"{items_total(final_items):g}")
         return await self.db.order(order_id)
 
     async def set_status(self, order_id: int, status: str) -> OrderView | None:
@@ -87,5 +94,6 @@ class OrderService:
         if not order:
             return None
         await self.db.set_order_status(order_id, status)
+        logger.info("Заказ №%s: статус %s → %s", order_id, order.status, status)
         order.status = status
         return order

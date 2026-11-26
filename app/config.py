@@ -157,6 +157,13 @@ class Settings:
     vk_chat_peer_id: int = 0      # беседа, куда бот пишет погоду, поздравления, напоминания
     vk_admins: tuple[str, ...] = ()
 
+    # Журнал и наблюдение за работой
+    log_dir: Path | None = None         # куда писать файл журнала (None — только консоль)
+    log_level: str = "INFO"
+    startup_notice: bool = True         # сообщить менеджерам в ВК, что бот запущен
+    healthcheck_url: str = ""           # «сторож»: бот раз в несколько минут открывает этот адрес
+    healthcheck_interval_min: int = 5
+
     @property
     def llm_enabled(self) -> bool:
         return bool(self.llm_providers)
@@ -255,4 +262,9 @@ def load_settings() -> Settings:
         vk_group_id=int("".join(ch for ch in _str("VK_GROUP_ID") if ch.isdigit()) or 0),  # «club123» → 123
         vk_chat_peer_id=_int("VK_CHAT_PEER_ID"),
         vk_admins=_handles("VK_ADMINS"),
+        log_dir=_path("LOG_DIR", "logs") if _bool("LOG_TO_FILE", True) else None,
+        log_level=_str("LOG_LEVEL", "INFO").upper() or "INFO",
+        startup_notice=_bool("STARTUP_NOTICE", True),
+        healthcheck_url=_str("HEALTHCHECK_URL"),
+        healthcheck_interval_min=max(1, _int("HEALTHCHECK_INTERVAL_MIN", 5)),
     )

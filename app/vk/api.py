@@ -139,28 +139,40 @@ class VkApi:
     async def listen(self) -> AsyncIterator[dict]:
         """Бесконечный поток событий сообщества (Bots Long Poll API)."""
         server = None
+        last_ts = None   # откуда продолжать чтение: пока сеть была недоступна, события ждут у ВКонтакте, и мы их заберём
+        errors = 0
         while True:
             try:
                 if server is None:
                     server = await self.call("groups.getLongPollServer", group_id=self.group_id)
+                    if last_ts is not None:
+                        server["ts"] = last_ts
                 session = await self._http()
                 params = {"act": "a_check", "key": server["key"], "ts": server["ts"], "wait": 25}
                 async with session.get(server["server"], params=params) as resp:
                     data = await resp.json(content_type=None)
+                errors = 0
                 if "failed" in data:
-                    if data["failed"] == 1:
-                        server["ts"] = data["ts"]
-                    else:  # ключ устарел или потерялась информация — берём новый сервер
+                    failed = data["failed"]
+                    if failed == 1:      # история устарела: ВК даёт верный ts
+                        server["ts"] = last_ts = data["ts"]
+                    elif failed == 2:    # ключ истёк: берём новый ключ, но читаем с прежнего места
+                        last_ts = server["ts"]
+                        server = None
+                    else:                # 3: информация потеряна — начинаем с нуля
+                        last_ts = None
                         server = None
                     continue
-                server["ts"] = data["ts"]
+                server["ts"] = last_ts = data["ts"]
                 for update in data.get("updates", []):
                     yield update
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — сеть пропала и т.п.: ждём и пробуем снова
+                errors += 1
                 logger.warning("VK Long Poll: %s — повтор через 5 с", exc)
-                server = None
+                if errors >= 3:   # возможно, сервер сменился: берём новый, но читаем с прежнего места (last_ts)
+                    server = None
                 await asyncio.sleep(5)
 
     async def close(self) -> None:

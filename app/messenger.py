@@ -148,6 +148,8 @@ class Messenger:
             delivered += await self._vk_send(uid, text, vk_kb.order_status(order.id, weigh=order_has_weight(order)))
         if not delivered:
             logger.error("Заказ №%s: ни одному менеджеру не удалось отправить уведомление!", order.id)
+        else:
+            logger.info("Заказ №%s: уведомление получили менеджеры: %d", order.id, delivered)
         return delivered
 
     async def notify_customer(self, order: OrderView) -> None:
@@ -200,6 +202,15 @@ class Messenger:
             delivered += await self._vk_send(uid, html)
         if not delivered:
             logger.error("Вопрос покупателя некому передать: ни один менеджер не получил сообщение!")
+        else:
+            logger.info("Вопрос покупателя передан менеджерам: %d", delivered)
+        return delivered
+
+    async def notify_startup(self, html: str) -> int:
+        """Менеджерам в ВК: бот запущен (видно любой перезапуск). Возвращает, скольким дошло."""
+        delivered = 0
+        for uid in await self.vk_manager_ids():
+            delivered += await self._vk_send(uid, html)
         return delivered
 
     async def notify_promo(self, platform: str, user_id: int, name: str, username: str | None,

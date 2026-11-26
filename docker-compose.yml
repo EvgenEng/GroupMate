@@ -7,3 +7,9 @@ services:
     volumes:
       - ./data:/app/data          # база (дни рождения, заказы) переживает перезапуски
       - ./config:/app/config      # каталог, праздники и характер бота правятся без пересборки
+      - ./logs:/app/logs          # журнал работы (logs/bot.log) виден на сервере и переживает перезапуски
+    logging:                      # журнал самого Docker: не больше 3 файлов по 10 МБ
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

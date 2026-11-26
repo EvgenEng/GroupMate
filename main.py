@@ -11,6 +11,8 @@ import sys
 from app import jobs
 from app.config import load_settings
 from app.context import AppContext, build_context
+from app.heartbeat import run_heartbeat
+from app.logsetup import collect_secrets, setup_logging
 from app.scheduler import Scheduler
 
 logger = logging.getLogger("main")
@@ -73,8 +75,8 @@ async def run_vk(ctx: AppContext) -> None:
         await api.close()
 
 
-async def run() -> None:
-    settings = load_settings()
+async def run(settings=None) -> None:
+    settings = settings or load_settings()
     if not settings.tg_enabled and not settings.vk_enabled:
         sys.exit("Не настроен ни Telegram (BOT_TOKEN), ни ВКонтакте (VK_TOKEN + VK_GROUP_ID). "
                  "Скопируйте .env.example в .env и заполните его.")
@@ -85,6 +87,10 @@ async def run() -> None:
     scheduler = Scheduler(settings.timezone)
     jobs.register(scheduler, ctx)
     scheduler.start()
+    heartbeat = None
+    if settings.healthcheck_url:
+        heartbeat = asyncio.create_task(run_heartbeat(settings.healthcheck_url, settings.healthcheck_interval_min))
+        logger.info("Сторож включён: пинг каждые %d мин", settings.healthcheck_interval_min)
 
     bots = []
     if settings.tg_enabled:
@@ -94,16 +100,23 @@ async def run() -> None:
     try:
         await asyncio.gather(*bots)
     finally:
+        if heartbeat:
+            heartbeat.cancel()
         await scheduler.stop()
         ctx.db.close()
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    settings = load_settings()
+    setup_logging(settings.log_level, settings.log_dir, collect_secrets(settings))
+    logger.info("Запуск бота. Журнал: %s", settings.log_dir / "bot.log" if settings.log_dir else "только консоль")
     try:
-        asyncio.run(run())
+        asyncio.run(run(settings))
     except KeyboardInterrupt:
         pass
+    except Exception:  # noqa: BLE001 — причина остановки должна попасть в журнал; код 1 → Docker перезапустит
+        logger.critical("Бот остановился из-за ошибки", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

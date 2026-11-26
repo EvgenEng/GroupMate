@@ -57,6 +57,7 @@ PHRASES = {
 ARG_COMMANDS = {"mybd": "mybd", "др": "mybd", "bd_add": "bd_add", "bd_del": "bd_del",
                 "promo": "promo", "промокод": "promo"}
 CHECKOUT_BUTTONS = {"no_comment", "use_name", "use_phone", "skip_bd", "no_phone", "w_same"}
+STARTUP_NOTICE_GAP = 600   # секунд: не чаще одного сообщения «бот запущен» за 10 минут
 HANDOFF_DAILY_CAP = 5   # сколько раз в сутки один человек может передать вопрос менеджеру
 ADMIN_COMMANDS = {"test_morning", "test_evening", "test_bd", "bd_list", "bd_sync", "bd_add", "bd_del", "stats", "export"}
 
@@ -151,9 +152,25 @@ class VkBot:
         except Exception as exc:  # noqa: BLE001
             logger.warning("ВК: не удалось получить данные сообщества: %s", exc)
 
+    async def announce_start(self) -> None:
+        """Сообщает менеджерам, что бот запущен. Не чаще раза в 10 минут: при перезапусках по кругу не заспамит."""
+        if not self.ctx.settings.startup_notice:
+            return
+        try:
+            last = await self.ctx.db.kv_get("startup_notice:last")
+            if isinstance(last, (int, float)) and time.time() - last < STARTUP_NOTICE_GAP:
+                logger.info("Уведомление о запуске пропущено: недавно уже отправляли")
+                return
+            await self.ctx.db.kv_set("startup_notice:last", time.time())
+            delivered = await self.ctx.messenger.notify_startup("✅ Бот GASTRODOM запущен и работает.")
+            logger.info("Уведомление о запуске: получили менеджеры — %d", delivered)
+        except Exception as exc:  # noqa: BLE001 — уведомление не должно мешать запуску
+            logger.warning("Не удалось отправить уведомление о запуске: %s", exc)
+
     async def run(self) -> None:
         await self.start()
         logger.info("ВК-бот запущен")
+        self._spawn(self.announce_start())
         async for update in self.api.listen():
             await self.handle(update)
 
@@ -545,6 +562,7 @@ class VkBot:
             await self.send_rule_reply(peer_id, user_id, text, reply, chat)
             return
         if not ctx.llm.enabled:
+            logger.info("Без ответа (правила не подошли)%s: %r", " [беседа]" if chat else "", text[:200])
             if not chat:
                 self.handoff_q[user_id] = (text, "")
                 await self.send(peer_id, "Не уверен, что понял вас 🙂 Могу показать каталог или передать ваш вопрос "

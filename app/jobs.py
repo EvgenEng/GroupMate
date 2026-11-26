@@ -67,6 +67,8 @@ async def birthdays(ctx: AppContext, now: datetime) -> None:
     items = await ctx.db.list_birthdays()
     today = now.date()
     people = [b for b in items if bd.is_today(b, today)]
+    if people:
+        logger.info("Дни рождения: сегодня именинников — %d", len(people))
     s = ctx.settings
     if people and (s.vk_chat_peer_id or s.group_chat_id):   # общий пост — только если есть группа или беседа
         await ctx.messenger.to_groups(await make_greeting(ctx, people))
