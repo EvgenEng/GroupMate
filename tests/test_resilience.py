@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import sys
 import tempfile
 import types
@@ -84,27 +85,31 @@ class LogFileTests(unittest.TestCase):
             h.close()
             root.removeHandler(h)
 
+    def make_tmp(self) -> Path:
+        """Папка, которую удалим уже после tearDown: на Windows открытый файл журнала удалить нельзя."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        return Path(tmp)
+
     def test_log_goes_to_rotating_file_without_secrets(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            log_dir = Path(tmp) / "logs"   # папки ещё нет — бот создаёт сам
-            setup_logging("INFO", log_dir, ("SECRET-VALUE",))
-            logging.getLogger("t").info("ключ SECRET-VALUE, +7 999 123-45-67, заказ №7")
-            for h in logging.getLogger().handlers:
-                h.flush()
-            text = (log_dir / "bot.log").read_text(encoding="utf-8")
-            self.assertIn("заказ №7", text)
-            self.assertNotIn("SECRET-VALUE", text)
-            self.assertNotIn("123-45-67", text)
-            from logging.handlers import RotatingFileHandler
-            rot = [h for h in logging.getLogger().handlers if isinstance(h, RotatingFileHandler)][0]
-            self.assertEqual((rot.maxBytes, rot.backupCount), (5 * 1024 * 1024, 5))
+        log_dir = self.make_tmp() / "logs"   # папки ещё нет — бот создаёт сам
+        setup_logging("INFO", log_dir, ("SECRET-VALUE",))
+        logging.getLogger("t").info("ключ SECRET-VALUE, +7 999 123-45-67, заказ №7")
+        for h in logging.getLogger().handlers:
+            h.flush()
+        text = (log_dir / "bot.log").read_text(encoding="utf-8")
+        self.assertIn("заказ №7", text)
+        self.assertNotIn("SECRET-VALUE", text)
+        self.assertNotIn("123-45-67", text)
+        from logging.handlers import RotatingFileHandler
+        rot = [h for h in logging.getLogger().handlers if isinstance(h, RotatingFileHandler)][0]
+        self.assertEqual((rot.maxBytes, rot.backupCount), (5 * 1024 * 1024, 5))
 
     def test_unwritable_dir_does_not_break_startup(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            blocker = Path(tmp) / "file"
-            blocker.write_text("x")
-            setup_logging("INFO", blocker / "logs")   # «папка» внутри файла: создать нельзя
-            logging.getLogger("t").info("работаем без файла")
+        blocker = self.make_tmp() / "file"
+        blocker.write_text("x")
+        setup_logging("INFO", blocker / "logs")   # «папка» внутри файла: создать нельзя
+        logging.getLogger("t").info("работаем без файла")
 
 
 class HeartbeatTests(unittest.IsolatedAsyncioTestCase):
