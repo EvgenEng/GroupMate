@@ -138,7 +138,7 @@ class Settings:
 
     welcome_enabled: bool = True
     order_reminders_enabled: bool = True
-    order_reminder_weekdays: tuple[int, ...] = (4,)  # 0=пн … 4=пт
+    order_reminder_weekdays: tuple[int, ...] = (0,)  # 0=пн … 4=пт; по умолчанию понедельник: производству нужно время
     order_reminder_time: tuple[int, int] = (12, 0)
     cart_reminders_enabled: bool = True     # ВК: один раз напомнить о брошенной корзине
     cart_reminder_hours: int = 24           # через сколько часов после последнего действия напомнить
@@ -248,7 +248,7 @@ def load_settings() -> Settings:
         birthday_time=_time("BIRTHDAY_TIME", "10:00"),
         welcome_enabled=_bool("WELCOME_ENABLED", True),
         order_reminders_enabled=_bool("ORDER_REMINDERS_ENABLED", True),
-        order_reminder_weekdays=_weekdays(_str("ORDER_REMINDER_WEEKDAYS"), (4,)),
+        order_reminder_weekdays=_weekdays(_str("ORDER_REMINDER_WEEKDAYS"), (0,)),
         order_reminder_time=_time("ORDER_REMINDER_TIME", "12:00"),
         cart_reminders_enabled=_bool("CART_REMINDERS_ENABLED", True),
         cart_reminder_hours=max(1, _int("CART_REMINDER_HOURS", 24)),
